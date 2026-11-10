@@ -465,31 +465,36 @@ def parse_time(value, default):
     return value
 
 
+def slot_form_args(query, day):
+    return {
+        "branch": query.branch,
+        "month": f"{day.year}年{day.month}月",
+        "day": f"{day.month}月{day.day}日",
+        "adults": query.adults,
+        "kids": query.kids,
+    }
+
+
 def read_slot_state(page, query, day, timeout=20000):
     return page.wait_for_function(
-        READ_FORM,
-        arg={
-            "branch": query.branch,
-            "month": f"{day.year}年{day.month}月",
-            "day": f"{day.month}月{day.day}日",
-            "adults": query.adults,
-            "kids": query.kids,
-        },
-        polling=400,
-        timeout=timeout,
+        READ_FORM, arg=slot_form_args(query, day), polling=400, timeout=timeout,
     ).json_value()
 
 
-def verification_result(day):
-    return Result(day, detail=VERIFICATION_DETAIL, failed=True, stop=True, needs_verification=True)
+def verification_message(stage):
+    return f"{VERIFICATION_DETAIL} 偵測時正在「{stage}」。"
 
 
-def active_browser_stop(page, day):
+def verification_result(day, stage):
+    return Result(day, detail=verification_message(stage), failed=True, stop=True, needs_verification=True)
+
+
+def active_browser_stop(page, day, stage):
     if page.is_closed():
         return Result(day, detail="查詢用的 Chrome 視窗已關閉。", failed=True, stop=True)
     with suppress(BrowserError):
         if page.evaluate(BROWSER_VERIFICATION):
-            return verification_result(day)
+            return verification_result(day, stage)
     return None
 
 
@@ -545,8 +550,9 @@ def select_booking_date(page, day, cancel):
 
 
 def check_day(page, query, day, cancel, *, refresh):
+    stage = "開啟或切換查詢日期"
     try:
-        stopped = active_browser_stop(page, day)
+        stopped = active_browser_stop(page, day, stage)
         if stopped or cancel.is_set():
             return stopped or Result(day, failed=True)
         url = query.booking_url()
@@ -566,13 +572,23 @@ def check_day(page, query, day, cancel, *, refresh):
                 page.wait_for_function(BROWSER_VERIFICATION, polling=250, timeout=2000)
             except BrowserTimeout:
                 return Result(day, detail=f"inline 拒絕或限制存取（HTTP {response.status}）。", failed=True, stop=True)
-            return verification_result(day)
+            return verification_result(day, stage)
         if response and response.status >= 400:
             return Result(day, detail=f"inline 回傳 HTTP {response.status}。", failed=True)
 
         ready = page.wait_for_function(BOOKING_FORM_READY, arg=query.branch, polling=250, timeout=20000).json_value()
         if ready == "blocked":
-            return verification_result(day)
+            return verification_result(day, stage)
+        # A fresh page can already show the requested date and party size.
+        # In that case, read what is displayed without clicking the calendar.
+        if response is not None:
+            state = page.evaluate(READ_FORM, slot_form_args(query, day))
+            if state:
+                if state.get("blocked"):
+                    return verification_result(day, "讀取時段")
+                return Result(day, tuple(state["slots"]), state.get("detail", ""))
+
+        stage = "設定查詢人數"
         for field, count in (("adult-picker", query.adults), ("kid-picker", query.kids)):
             if cancel.is_set():
                 return Result(day, failed=True)
@@ -581,16 +597,18 @@ def check_day(page, query, day, cancel, *, refresh):
                 picker.select_option(value=str(count), timeout=5000)
         if cancel.is_set():
             return Result(day, failed=True)
+        stage = "選擇查詢日期"
         if not select_booking_date(page, day, cancel):
-            return active_browser_stop(page, day) or Result(day, detail="inline 日曆未開放這一天。")
+            return active_browser_stop(page, day, stage) or Result(day, detail="inline 日曆未開放這一天。")
+        stage = "讀取時段"
         state = read_slot_state(page, query, day)
         if state.get("blocked"):
-            return verification_result(day)
+            return verification_result(day, stage)
         return Result(day, tuple(state["slots"]), state.get("detail", ""))
     except BrowserTimeout:
-        return active_browser_stop(page, day) or Result(day, detail="等待 inline 回應逾時，或 inline 未套用指定日期、人數。", failed=True)
+        return active_browser_stop(page, day, stage) or Result(day, detail=f"{stage}逾時，請查看 inline 畫面。", failed=True)
     except (BrowserError, ValueError):
-        return active_browser_stop(page, day) or Result(day, detail="讀取 inline 訂位頁失敗。", failed=True)
+        return active_browser_stop(page, day, stage) or Result(day, detail=f"{stage}失敗，請查看 inline 畫面。", failed=True)
 
 
 def calendar_dates(page, query, today, cancel):
@@ -677,6 +695,16 @@ class BookingHandoff:
     note: str
     verification_url: str = ""
     submitted: bool = False
+    needs_verification: bool = False
+
+
+class BrowserVerificationRequired(Exception):
+    pass
+
+
+def check_booking_verification(page):
+    if page.evaluate(BROWSER_VERIFICATION):
+        raise BrowserVerificationRequired
 
 
 def start_booking(page, query, result, profile, cancel):
@@ -684,9 +712,11 @@ def start_booking(page, query, result, profile, cancel):
     entering_form = False
     submitting = False
     verification_url = ""
+    stage = "選擇桌型"
     try:
         if cancel.is_set() or urlparse(page.url).hostname != "inline.app":
             return None
+        check_booking_verification(page)
         table = page.locator("#table-tag-selector:visible")
         if table.count():
             candidates = TABLE_TYPES if profile.table == ANY_TABLE else (profile.table,)
@@ -701,7 +731,9 @@ def start_booking(page, query, result, profile, cancel):
             if cancel.is_set():
                 return None
             times = result.slots
+            stage = "選擇桌型"
             try:
+                check_booking_verification(page)
                 if table_name:
                     option = table.get_by_role("button", name=table_name, exact=True)
                     if not option.count() or not option.is_enabled(timeout=3000):
@@ -710,13 +742,15 @@ def start_booking(page, query, result, profile, cancel):
                         option.click(timeout=4000)
                         state = read_slot_state(page, query, result.day, timeout=6000)
                         if state.get("blocked"):
-                            return BookingHandoff("inline 要求瀏覽器驗證。請到 Chrome 查看。")
+                            raise BrowserVerificationRequired
                         times = tuple(time for time in times if time in state["slots"])
                     if option.get_attribute("aria-pressed", timeout=3000) != "true":
                         continue
+                stage = "選擇時段"
                 for time in sorted(times):
                     if cancel.is_set():
                         return None
+                    check_booking_verification(page)
                     hour, minute = time.split(":")
                     alternatives = (f"{hour}-{minute}", f"{int(hour)}-{minute}")
                     attributes = ", ".join(f'[data-cy="book-now-time-slot-box-{key}"]' for key in alternatives)
@@ -730,12 +764,15 @@ def start_booking(page, query, result, profile, cancel):
                         selected_time = time
                         break
             except BrowserTimeout:
+                check_booking_verification(page)
                 continue
             if selected_time:
                 break
         if not selected_time or cancel.is_set():
             return None
 
+        check_booking_verification(page)
+        stage = "開啟訂位表單"
         entering_form = True
         action.click(timeout=6000)
         form = page.locator("form#contact-form:visible")
@@ -744,6 +781,8 @@ def start_booking(page, query, result, profile, cancel):
             return None
         if urlparse(page.url).hostname != "inline.app":
             return BookingHandoff("已停止自動操作，請檢查 Chrome 的訂位頁面。")
+        check_booking_verification(page)
+        stage = "填寫聯絡資料"
         verification_url = page.url
         country = form.evaluate(
             """form => [...form.querySelectorAll('select')].find(select =>
@@ -762,6 +801,7 @@ def start_booking(page, query, result, profile, cancel):
                 return None
             if value:
                 form.locator(f'input[data-cy="{field}"]').fill(value, timeout=5000)
+        check_booking_verification(page)
         deposit_policy = form.locator('#deposit-policy:visible')
         if deposit_policy.count():
             return BookingHandoff("聯絡資料已填好。請到 Chrome 閱讀訂金／取消條款並繼續訂位。", verification_url)
@@ -773,15 +813,24 @@ def start_booking(page, query, result, profile, cancel):
         submit = form.locator('button[data-cy="submit"]:visible').filter(
             has_text=re.compile(r"^\s*確認訂位\s*$"),
         )
+        check_booking_verification(page)
+        stage = "送出確認訂位"
         submitting = True
         submit.click(timeout=6000)
+        check_booking_verification(page)
         selected_table = f"（{table_name}）" if table_name else ""
         return BookingHandoff(
             f"{result.day.isoformat()} {selected_time}{selected_table} 已點選確認訂位。"
             "請到 Chrome 查看訂位狀態。",
             verification_url, submitted=True,
         )
-    except BrowserError:
+    except (BrowserVerificationRequired, BrowserError) as exc:
+        stopped = active_browser_stop(page, result.day, stage)
+        if isinstance(exc, BrowserVerificationRequired) or (stopped and stopped.needs_verification):
+            note = verification_message(stage) + " 自動訂位已暫停，請到 Chrome 查看。"
+            if submitting:
+                note += " 請先確認訂位是否已送出。"
+            return BookingHandoff(note, needs_verification=True)
         if submitting:
             return BookingHandoff("無法確認表單是否已送出，請到 Chrome 檢查目前狀態。", verification_url)
         if entering_form:
@@ -882,14 +931,16 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                             if not result.failed:
                                 previous[day] = set(result.slots)
                                 round_slots.update((day, slot) for slot in result.slots)
-                            events.put(("result", (result, bool(new_slots))))
+                            last_slots = tuple(sorted(previous.get(day, ()))) if result.failed else ()
+                            events.put(("result", (result, bool(new_slots), last_slots)))
                         if result.stop:
                             halted = result
                             break
-                        if booking and matches and result.slots:
+                        if repeat and booking and matches and result.slots:
                             handoff = start_booking(page, query, result, booking, cancel)
                             if handoff:
-                                events.put(("booking", handoff.note))
+                                kind = "booking_verification" if handoff.needs_verification else "booking"
+                                events.put((kind, handoff.note))
                                 with suppress(BrowserError):
                                     page.bring_to_front()
                                 break
@@ -907,9 +958,9 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                                             if result.failed and matches else "目前沒有顯示符合條件的可訂日期或時段。"
                                         )
                             except (BrowserError, ValueError):
-                                halted = active_browser_stop(page, day)
+                                halted = active_browser_stop(page, day, "掃描其他可訂日期")
                                 if halted:
-                                    events.put(("result", (halted, False)))
+                                    events.put(("result", (halted, False, tuple(sorted(previous.get(day, ()))))))
                                     break
                                 note = "本輪未能完整讀取 inline 日曆。"
                         index += 1
@@ -926,7 +977,7 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                         return
                     if halted:
                         if halted.needs_verification:
-                            events.put(("verification", "這次查詢已停止。請在原本的 Chrome 視窗完成人機驗證，可直接在該頁手動查詢或訂位。"))
+                            events.put(("verification", halted.detail + " 這次查詢已停止，請在原本的 Chrome 視窗查看。"))
                             with suppress(BrowserError):
                                 page.bring_to_front()
                             wait_for_chrome(page, cancel)
@@ -1342,8 +1393,10 @@ class WatcherWindow:
                 self.open.configure(state="disabled")
                 self.stop.configure(text="關閉訂位視窗")
                 self.root.bell()
-            elif kind == "verification" and not self.cancel.is_set():
+            elif kind in ("verification", "booking_verification") and not self.cancel.is_set():
                 self.status.set(payload)
+                if kind == "booking_verification":
+                    self.auto_book.set(False)
                 self.stop.configure(text="關閉驗證視窗")
                 self.open.configure(state="disabled")
                 self.root.bell()
@@ -1373,15 +1426,19 @@ class WatcherWindow:
                 self.worker = None
         self.root.after(120, self.handle_events)
 
-    def display_result(self, result, new_slots):
+    def display_result(self, result, new_slots, last_slots=()):
         day = result.day.isoformat()
-        if result.failed:
+        updated = datetime.now(TAIPEI).strftime("%H:%M:%S")
+        if result.failed and last_slots and self.rows.exists(day):
+            text, tag = f"先前可訂｜{'、'.join(last_slots)}（本次未確認）", "failed"
+            updated = self.rows.item(day, "values")[2]
+        elif result.failed:
             text, tag = f"查詢未確認｜{result.detail}", "failed"
         elif result.slots:
             text, tag = f"可訂｜{'、'.join(result.slots)}", "available"
         else:
             text, tag = f"無可訂時段｜{result.detail}", ""
-        values = (day, text, datetime.now(TAIPEI).strftime("%H:%M:%S"))
+        values = (day, text, updated)
         if self.rows.exists(day):
             self.rows.item(day, values=values, tags=(tag,))
         else:
