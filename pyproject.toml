@@ -1,0 +1,10 @@
+[project]
+name = "island-inline-watcher"
+version = "0.1.0"
+description = "島語 inline 空位監看與訂位助手"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = ["playwright>=1.62.0,<2"]
+
+[tool.uv]
+package = false
