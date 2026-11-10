@@ -2,8 +2,8 @@
 
 Windows 一鍵啟動：雙擊 start.bat，由 uv 準備 Python 3.12 和 Playwright。
 需要 Google Chrome。程式會開啟獨立的 Chrome 視窗讀取公開訂位頁。
-Email 支援使用 SSL/TLS 或 STARTTLS 的 SMTP 服務。應用程式密碼只在這次
-執行使用，也可以從 ISLAND_SMTP_PASSWORD 環境變數讀取。
+訂位與 Email 設定可儲存到專案的 .env。SMTP 密碼可選擇一併儲存。
+也可以從 ISLAND_SMTP_PASSWORD 環境變數讀取 SMTP 密碼。
 """
 import base64
 import json
@@ -25,6 +25,8 @@ from email.message import EmailMessage
 from pathlib import Path
 from tkinter import messagebox, ttk
 from urllib.parse import urlencode, urlparse
+
+from dotenv import dotenv_values, set_key
 
 try:
     from playwright.sync_api import Error as BrowserError
@@ -48,7 +50,10 @@ MAX_DAYS = 7
 CALENDAR_MONTHS = 12
 CALENDAR = '#calendar-picker'
 AVAILABLE_DAY = '[data-cy="bt-cal-day"][data-date]:not([disabled]):not([aria-disabled="true"])'
-MAIL_FILE = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "IslandInlineWatcher" / "email.json"
+SETTINGS_ENV = Path(__file__).resolve().with_name(".env")
+BOOKING_KEY = "ISLAND_BOOKING_PROFILE"
+MAIL_KEY = "ISLAND_MAIL_SETTINGS"
+LEGACY_MAIL_FILE = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "IslandInlineWatcher" / "email.json"
 DAY_OPTIONS = ("不限", "只限週六、週日", "台灣放假日（2026–2027）", "台灣上班日（2026–2027）")
 ANY_TABLE = "不限桌型"
 TABLE_TYPES = ("一般", "板前吧台")
@@ -153,6 +158,33 @@ class Result:
     stop: bool = False
 
 
+def read_saved_settings(key):
+    if not SETTINGS_ENV.is_file():
+        return None
+    value = dotenv_values(SETTINGS_ENV, encoding="utf-8-sig", interpolate=False).get(key)
+    if value is None:
+        return None
+    settings = json.loads(value)
+    if not isinstance(settings, dict):
+        raise ValueError("設定格式錯誤。")
+    return settings
+
+
+def write_saved_settings(key, settings):
+    # JSON quoting produces one dotenv value even when the settings contain
+    # quotes, backslashes, or dollar signs.
+    value = json.dumps(json.dumps(settings, ensure_ascii=False), ensure_ascii=False)
+    with tempfile.NamedTemporaryFile(dir=SETTINGS_ENV.parent, prefix=".env.", delete=False) as file:
+        temporary = Path(file.name)
+    try:
+        if SETTINGS_ENV.exists():
+            temporary.write_bytes(SETTINGS_ENV.read_bytes().removeprefix(b"\xef\xbb\xbf"))
+        set_key(temporary, key, value, quote_mode="never", encoding="utf-8")
+        temporary.replace(SETTINGS_ENV)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @dataclass(frozen=True)
 class BookingProfile:
     family_name: str
@@ -181,6 +213,14 @@ class BookingProfile:
         if table not in TABLE_OPTIONS:
             raise ValueError("請選擇用餐桌型。")
         return cls(family_name, given_name, phone, email, table)
+
+    @classmethod
+    def load(cls):
+        values = read_saved_settings(BOOKING_KEY)
+        return cls.from_fields(**values) if values is not None else None
+
+    def save(self):
+        write_saved_settings(BOOKING_KEY, asdict(self))
 
 
 @dataclass(frozen=True)
@@ -222,23 +262,25 @@ class MailSettings:
 
     @classmethod
     def load(cls):
-        values = json.loads(MAIL_FILE.read_text(encoding="utf-8"))
-        return cls.from_fields(
+        values = read_saved_settings(MAIL_KEY)
+        password = ""
+        if values is None:
+            values = json.loads(LEGACY_MAIL_FILE.read_text(encoding="utf-8"))
+        else:
+            password = values.get("password", "")
+            if not isinstance(password, str):
+                raise ValueError("SMTP 密碼格式錯誤。")
+        settings = cls.from_fields(
             values["host"], str(values["port"]), values["security"],
             values["sender"], ",".join(values["recipients"]),
         )
+        return settings, password
 
-    def save(self):
-        MAIL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=MAIL_FILE.parent, delete=False) as file:
-            temporary = Path(file.name)
-            try:
-                json.dump(asdict(self), file, ensure_ascii=False, indent=2)
-                file.close()
-                temporary.replace(MAIL_FILE)
-            finally:
-                file.close()
-                temporary.unlink(missing_ok=True)
+    def save(self, password=""):
+        values = asdict(self)
+        if password:
+            values["password"] = password
+        write_saved_settings(MAIL_KEY, values)
 
 
 @contextmanager
@@ -702,17 +744,24 @@ class WatcherWindow:
         self.closing = False
         self.mail_settings = None
         self.mail_password = ""
+        self.remember_mail_password = False
         self.mail_test_button = None
         self.mail_testing = False
         self.booking_profile = None
         self.booking_in_progress = False
         mail_hint = "可在 Email 設定中指定寄件帳號及收件人。"
+        booking_hint = ""
         try:
-            self.mail_settings = MailSettings.load()
+            self.mail_settings, self.mail_password = MailSettings.load()
+            self.remember_mail_password = bool(self.mail_password)
         except FileNotFoundError:
             pass
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             mail_hint = "讀取 Email 設定失敗，請重新設定。"
+        try:
+            self.booking_profile = BookingProfile.load()
+        except (OSError, ValueError, TypeError, AttributeError):
+            booking_hint = "讀取訂位資料失敗，請從「訂位資料」重新設定。"
 
         root.title("島語｜inline 空位監看")
         root.geometry("820x645")
@@ -784,7 +833,9 @@ class WatcherWindow:
         for button in (self.once, self.watch, self.stop, self.open):
             button.pack(side="left", padx=(0, 7))
 
-        self.status = tk.StringVar(value="日期格式 YYYY-MM-DD。結束日期留空時只查一天，時間留空時不限時段。")
+        self.status = tk.StringVar(
+            value=booking_hint or "日期格式 YYYY-MM-DD。結束日期留空時只查一天，時間留空時不限時段。",
+        )
         ttk.Label(frame, textvariable=self.status, wraplength=635).pack(anchor="w")
         ttk.Label(frame, textvariable=self.mail_status, wraplength=635).pack(anchor="w", pady=(1, 10))
 
@@ -839,7 +890,7 @@ class WatcherWindow:
             widget.grid(row=row, column=1, sticky="ew", pady=4)
         ttk.Label(
             frame,
-            text="資料只保留在這次執行。程式最多送出一筆，簡訊驗證及訂金由你完成。",
+            text="儲存後下次會自動帶入。簡訊驗證及訂金由你完成。",
             wraplength=395,
         ).grid(row=5, columnspan=2, sticky="w", pady=(6, 5))
 
@@ -854,14 +905,19 @@ class WatcherWindow:
 
         def save():
             try:
-                self.booking_profile = BookingProfile.from_fields(*(variable.get() for variable in variables))
+                profile = BookingProfile.from_fields(*(variable.get() for variable in variables))
+                profile.save()
             except ValueError as exc:
                 messagebox.showerror("請確認訂位資料", str(exc), parent=dialog)
                 return
-            self.status.set("已設定訂位資料。勾選「自動訂位」後可開始監看。")
+            except OSError as exc:
+                messagebox.showerror("無法儲存訂位資料", str(exc), parent=dialog)
+                return
+            self.booking_profile = profile
+            self.status.set("已儲存訂位資料，下次開啟會自動帶入。")
             dialog.destroy()
 
-        ttk.Button(buttons, text="完成", command=save).pack(side="left")
+        ttk.Button(buttons, text="儲存", command=save).pack(side="left")
         dialog.grab_set()
 
     def open_mail_settings(self):
@@ -887,10 +943,14 @@ class WatcherWindow:
                 field = ttk.Entry(frame, textvariable=variable, width=47, show="*" if i == 5 else "")
             field.grid(row=i, column=1, sticky="ew", pady=4)
 
-        ttk.Label(frame, text="收件人可填多個地址，用逗號分隔。密碼只在本次執行使用。").grid(
+        remember_password = tk.BooleanVar(value=self.remember_mail_password)
+        ttk.Label(frame, text="多位收件人以逗號分隔。").grid(
             row=6, columnspan=2, sticky="w", pady=(4, 6),
         )
-        ttk.Label(frame, textvariable=self.mail_status, wraplength=490).grid(row=7, columnspan=2, sticky="w")
+        ttk.Checkbutton(frame, text="記住應用程式密碼（明文儲存在本機 .env）", variable=remember_password).grid(
+            row=7, columnspan=2, sticky="w",
+        )
+        ttk.Label(frame, textvariable=self.mail_status, wraplength=490).grid(row=8, columnspan=2, sticky="w")
 
         def read_fields():
             settings = MailSettings.from_fields(*(variable.get() for variable in variables[:5]))
@@ -902,14 +962,19 @@ class WatcherWindow:
         def save():
             try:
                 settings, _ = read_fields()
-                settings.save()
+                entered_password = variables[5].get()
+                saved_password = entered_password if remember_password.get() else ""
+                if remember_password.get() and not saved_password.strip():
+                    raise ValueError("請輸入要記住的 SMTP 應用程式密碼。")
+                settings.save(saved_password)
             except (OSError, ValueError) as exc:
                 messagebox.showerror("無法儲存 Email 設定", str(exc), parent=dialog)
                 return
             self.mail_settings = settings
-            self.mail_password = variables[5].get()
+            self.mail_password = entered_password
+            self.remember_mail_password = bool(saved_password)
             self.mail_enabled.set(True)
-            self.mail_status.set(f"已設定 {len(settings.recipients)} 位收件人。")
+            self.mail_status.set(f"已儲存 {len(settings.recipients)} 位收件人。")
             dialog.destroy()
 
         def test():
@@ -926,7 +991,7 @@ class WatcherWindow:
             threading.Thread(target=send_emails, args=(settings, password, self.events), daemon=True).start()
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=8, columnspan=2, sticky="e", pady=(9, 0))
+        buttons.grid(row=9, columnspan=2, sticky="e", pady=(9, 0))
         self.mail_test_button = ttk.Button(buttons, text="寄送測試信", command=test)
         if self.mail_testing:
             self.mail_test_button.configure(state="disabled")
