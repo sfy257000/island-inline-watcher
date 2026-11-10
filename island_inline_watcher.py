@@ -23,10 +23,16 @@ from email.errors import HeaderParseError
 from email.headerregistry import Address
 from email.message import EmailMessage
 from pathlib import Path
+from time import monotonic
 from tkinter import messagebox, ttk
 from urllib.parse import urlencode, urlparse
+from uuid import uuid4
 
 from dotenv import dotenv_values, set_key
+
+from booking_verification import (
+    CODE_LENGTH, GMAIL_SMTP, IMAP_ERRORS, REPLY_WAIT_SECONDS, find_challenge, gmail_mailbox, wait_for_reply,
+)
 
 try:
     from playwright.sync_api import Error as BrowserError
@@ -230,9 +236,10 @@ class MailSettings:
     security: str
     sender: str
     recipients: tuple[str, ...]
+    reply_verification: bool = False
 
     @classmethod
-    def from_fields(cls, host, port, security, sender, recipients):
+    def from_fields(cls, host, port, security, sender, recipients, reply_verification=False):
         host = host.strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host):
             raise ValueError("請輸入 SMTP 主機名稱，例如 smtp.gmail.com。")
@@ -251,6 +258,12 @@ class MailSettings:
             return parsed.addr_spec
 
         sender = address(sender)
+        if not isinstance(reply_verification, bool):
+            raise ValueError("回信驗證設定格式錯誤。")
+        if reply_verification and (
+            host.casefold() != GMAIL_SMTP or sender.rpartition("@")[2].casefold() != "gmail.com"
+        ):
+            raise ValueError("回信驗證請使用 Gmail 寄件帳號和 smtp.gmail.com。")
         unique = {}
         for part in re.split(r"[,;，；\n]", recipients):
             if part.strip():
@@ -258,7 +271,7 @@ class MailSettings:
                 unique.setdefault(recipient.casefold(), recipient)
         if not unique:
             raise ValueError("至少設定一個收件人。")
-        return cls(host, int(port), security, sender, tuple(unique.values()))
+        return cls(host, int(port), security, sender, tuple(unique.values()), reply_verification)
 
     @classmethod
     def load(cls):
@@ -272,7 +285,7 @@ class MailSettings:
                 raise ValueError("SMTP 密碼格式錯誤。")
         settings = cls.from_fields(
             values["host"], str(values["port"]), values["security"],
-            values["sender"], ",".join(values["recipients"]),
+            values["sender"], ",".join(values["recipients"]), values.get("reply_verification", False),
         )
         return settings, password
 
@@ -323,9 +336,19 @@ def notification_body(query, slots, booking_note=""):
     return "\n".join(lines + ["請以開啟 inline 時顯示的最新空位為準。"])
 
 
-def send_emails(settings, password, events, query=None, slots=(), delivered=None, cancel=None, booking_note=""):
-    pending = {}
-    for recipient in settings.recipients:
+def send_emails(
+    settings, password, events, query=None, slots=(), delivered=None, cancel=None,
+    booking_note="", reply_message_id=None,
+):
+    pending = {settings.sender: slots} if reply_message_id else {}
+    recipients = settings.recipients
+    if query is None and settings.reply_verification and all(
+        recipient.casefold() != settings.sender.casefold() for recipient in recipients
+    ):
+        recipients = (*recipients, settings.sender)
+    for recipient in recipients:
+        if reply_message_id and recipient.casefold() == settings.sender.casefold():
+            continue
         if query is None:
             pending[recipient] = None
         else:
@@ -333,8 +356,9 @@ def send_emails(settings, password, events, query=None, slots=(), delivered=None
             if new_slots:
                 pending[recipient] = new_slots
     if not pending or (cancel and cancel.is_set()):
-        return
+        return False
 
+    reply_sent = False
     accepted = 0
     error = ""
     try:
@@ -348,14 +372,27 @@ def send_emails(settings, password, events, query=None, slots=(), delivered=None
                 else:
                     subject = f"島語 {query.branch}｜發現可訂時段"
                     body = notification_body(query, new_slots, booking_note)
+                can_reply = bool(reply_message_id and recipient == settings.sender)
+                if can_reply:
+                    subject = f"島語 {query.branch}｜請回覆簡訊驗證碼｜{reply_message_id[1:9]}"
+                    body = (
+                        f"請用收到這封信的 Gmail 回覆原信，第一行只填 inline 簡訊上的 {CODE_LENGTH} 位數字。"
+                        "請在頁面顯示的期限內回覆，並保持監看程式和原本的 Chrome 頁面開啟。\n"
+                        "驗證碼會保留在 Gmail 回信中。\n\n" + body
+                    )
+                message = mail_message(settings.sender, recipient, subject, body)
+                if can_reply:
+                    message["Message-ID"] = reply_message_id
+                    message["Reply-To"] = settings.sender
                 try:
-                    refused = client.send_message(mail_message(settings.sender, recipient, subject, body))
+                    refused = client.send_message(message)
                 except smtplib.SMTPRecipientsRefused:
                     continue
                 if not refused:
                     if query is not None:
                         delivered.setdefault(recipient, set()).update(new_slots)
                     accepted += 1
+                    reply_sent |= can_reply
     except smtplib.SMTPAuthenticationError:
         error = "驗證失敗，請確認寄件帳號與應用程式密碼。"
     except (OSError, UnicodeError, smtplib.SMTPException):
@@ -366,7 +403,14 @@ def send_emails(settings, password, events, query=None, slots=(), delivered=None
         detail += error
     elif accepted < len(pending):
         detail += "其餘收件人尚未送出。"
+    if query is None and settings.reply_verification and accepted:
+        try:
+            with gmail_mailbox(settings.sender, password):
+                detail += " Gmail IMAP 連線成功。"
+        except IMAP_ERRORS:
+            detail += " Gmail IMAP 連線失敗，請確認 Gmail 帳號與應用程式密碼。"
     events.put(("mail_test" if query is None else "mail", detail))
+    return reply_sent
 
 
 def taipei_today():
@@ -531,26 +575,34 @@ def booking_summary_matches(summary, query, day, time, table):
     )
 
 
+@dataclass(frozen=True)
+class BookingHandoff:
+    note: str
+    verification_url: str = ""
+    submitted: bool = False
+
+
 def start_booking(page, query, result, profile, cancel):
-    """Open one contact form and submit it once, then leave verification to the user."""
+    """Open one contact form and submit it once, then describe the handoff."""
     entering_form = False
     submitting = False
+    verification_url = ""
     try:
         if cancel.is_set() or urlparse(page.url).hostname != "inline.app":
-            return ""
+            return None
         table = page.locator("#table-tag-selector:visible")
         if table.count():
             candidates = TABLE_TYPES if profile.table == ANY_TABLE else (profile.table,)
         elif profile.table in (ANY_TABLE, TABLE_TYPES[0]):
             candidates = ("",)
         else:
-            return ""
+            return None
 
         action = page.locator('button[data-cy="book-now-action-button"]:visible')
         selected_time = ""
         for table_name in candidates:
             if cancel.is_set():
-                return ""
+                return None
             times = result.slots
             try:
                 if table_name:
@@ -561,13 +613,13 @@ def start_booking(page, query, result, profile, cancel):
                         option.click(timeout=4000)
                         state = read_slot_state(page, query, result.day, timeout=6000)
                         if state.get("blocked"):
-                            return "inline 要求瀏覽器驗證。請到 Chrome 查看。"
+                            return BookingHandoff("inline 要求瀏覽器驗證。請到 Chrome 查看。")
                         times = tuple(time for time in times if time in state["slots"])
                     if option.get_attribute("aria-pressed", timeout=3000) != "true":
                         continue
                 for time in sorted(times):
                     if cancel.is_set():
-                        return ""
+                        return None
                     hour, minute = time.split(":")
                     alternatives = (f"{hour}-{minute}", f"{int(hour)}-{minute}")
                     attributes = ", ".join(f'[data-cy="book-now-time-slot-box-{key}"]' for key in alternatives)
@@ -585,16 +637,17 @@ def start_booking(page, query, result, profile, cancel):
             if selected_time:
                 break
         if not selected_time or cancel.is_set():
-            return ""
+            return None
 
         entering_form = True
         action.click(timeout=6000)
         form = page.locator("form#contact-form:visible")
         form.wait_for(state="visible", timeout=10000)
         if cancel.is_set():
-            return ""
+            return None
         if urlparse(page.url).hostname != "inline.app":
-            return "已停止自動操作，請檢查 Chrome 的訂位頁面。"
+            return BookingHandoff("已停止自動操作，請檢查 Chrome 的訂位頁面。")
+        verification_url = page.url
         country = form.evaluate(
             """form => [...form.querySelectorAll('select')].find(select =>
                 [...select.options].some(option => option.textContent.trim() === 'Taiwan +886')
@@ -602,40 +655,89 @@ def start_booking(page, query, result, profile, cancel):
             timeout=3000,
         )
         if country != "Taiwan +886":
-            return "已開啟訂位表單，請到 Chrome 確認手機國碼。"
+            return BookingHandoff("已開啟訂位表單，請到 Chrome 確認手機國碼。", verification_url)
 
         for field, value in (
             ("familyName", profile.family_name), ("givenName", profile.given_name),
             ("phone", profile.phone), ("email", profile.email),
         ):
             if cancel.is_set():
-                return ""
+                return None
             if value:
                 form.locator(f'input[data-cy="{field}"]').fill(value, timeout=5000)
         deposit_policy = form.locator('#deposit-policy:visible')
         if deposit_policy.count():
-            return "聯絡資料已填好。請到 Chrome 閱讀訂金／取消條款並繼續訂位。"
+            return BookingHandoff("聯絡資料已填好。請到 Chrome 閱讀訂金／取消條款並繼續訂位。", verification_url)
         if (form.locator('input[aria-invalid="true"]:visible').count()
                 or not form.evaluate("form => form.checkValidity()", timeout=3000)):
-            return "請到 Chrome 檢查已填的聯絡資料，再確認訂位。"
+            return BookingHandoff("請到 Chrome 檢查已填的聯絡資料，再確認訂位。", verification_url)
         if cancel.is_set():
-            return ""
+            return None
         submit = form.locator('button[data-cy="submit"]:visible').filter(
             has_text=re.compile(r"^\s*確認訂位\s*$"),
         )
         submitting = True
         submit.click(timeout=6000)
         selected_table = f"（{table_name}）" if table_name else ""
-        return (
+        return BookingHandoff(
             f"{result.day.isoformat()} {selected_time}{selected_table} 已點選確認訂位。"
-            "請到 Chrome 查看並完成簡訊驗證。"
+            "請到 Chrome 查看訂位狀態。",
+            verification_url, submitted=True,
         )
     except BrowserError:
         if submitting:
-            return "無法確認表單是否已送出，請到 Chrome 檢查目前狀態。"
+            return BookingHandoff("無法確認表單是否已送出，請到 Chrome 檢查目前狀態。", verification_url)
         if entering_form:
-            return "已暫停自動訂位，請到 Chrome 檢查表單。"
-        return ""
+            return BookingHandoff("已暫停自動訂位，請到 Chrome 檢查表單。", verification_url)
+        return None
+
+
+def notify_and_verify_booking(page, settings, password, query, slots, handoff, events, cancel):
+    checkout = None
+    challenge = None
+    if settings.reply_verification and handoff.verification_url and not cancel.is_set():
+        try:
+            if not page.is_closed() and page.url == handoff.verification_url:
+                checkout = page.query_selector("form#contact-form")
+                if checkout and handoff.submitted:
+                    challenge = find_challenge(page, checkout, handoff.verification_url, cancel, timeout=8)
+        except BrowserError:
+            checkout = None
+
+    if challenge is None:
+        send_emails(settings, password, events, query, slots, {}, cancel, handoff.note)
+        if checkout is None:
+            return
+        try:
+            challenge = find_challenge(page, checkout, handoff.verification_url, cancel)
+        except BrowserError:
+            return
+        if challenge is None:
+            return
+        # The other recipients already got the regular notification.
+        settings = replace(settings, recipients=(settings.sender,))
+
+    deadline = monotonic() + REPLY_WAIT_SECONDS
+    message_id = f"<{uuid4().hex}@gmail.com>"
+    reply_sent = send_emails(settings, password, events, query, slots, {}, cancel, handoff.note, message_id)
+    if cancel.is_set():
+        return
+    if not reply_sent:
+        events.put(("status", "驗證通知寄送失敗。請到原本的 Chrome 視窗手動驗證。"))
+        return
+
+    events.put(("status", f"正在等 Gmail 回信。請回覆原信，第一行只填簡訊上的 {CODE_LENGTH} 位數字。"))
+    try:
+        submitted = wait_for_reply(settings, password, message_id, deadline, cancel, challenge)
+        detail = (
+            "已送出回信中的驗證碼。請查看 Chrome 或 inline 通知確認訂位結果。"
+            if submitted else "已結束等候回信。請到原本的 Chrome 視窗查看或手動驗證。"
+        )
+    except IMAP_ERRORS:
+        detail = "Gmail 收信失敗。請到原本的 Chrome 視窗手動驗證。"
+    except BrowserError:
+        detail = "無法確認驗證碼是否已送出。請到原本的 Chrome 視窗查看。"
+    events.put(("status", detail))
 
 
 def run_query(query, repeat, cancel, events, settings=None, password="", booking=None):
@@ -659,7 +761,7 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                     round_slots = set()
                     note = "" if days else "剩餘日期不符合目前設定的日期條件。"
                     halted = False
-                    booking_note = ""
+                    handoff = None
                     index = 0
                     while index < len(days):
                         if cancel.is_set():
@@ -680,9 +782,9 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                             halted = True
                             break
                         if booking and matches and result.slots:
-                            booking_note = start_booking(page, query, result, booking, cancel)
-                            if booking_note:
-                                events.put(("booking", booking_note))
+                            handoff = start_booking(page, query, result, booking, cancel)
+                            if handoff:
+                                events.put(("booking", handoff.note))
                                 try:
                                     page.bring_to_front()
                                 except BrowserError:
@@ -707,9 +809,11 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                         if index < len(days) and cancel.wait(4):
                             return
                     if settings and round_slots:
-                        mail_history = {} if booking_note else delivered
-                        send_emails(settings, password, events, query, round_slots, mail_history, cancel, booking_note)
-                    if booking_note:
+                        if handoff:
+                            notify_and_verify_booking(page, settings, password, query, round_slots, handoff, events, cancel)
+                        else:
+                            send_emails(settings, password, events, query, round_slots, delivered, cancel)
+                    if handoff:
                         try:
                             while not cancel.is_set() and not page.is_closed():
                                 page.wait_for_timeout(300)
@@ -890,7 +994,7 @@ class WatcherWindow:
             widget.grid(row=row, column=1, sticky="ew", pady=4)
         ttk.Label(
             frame,
-            text="儲存後下次會自動帶入。簡訊驗證及訂金由你完成。",
+            text="儲存後下次會自動帶入。可在 Email 設定開啟簡訊回信驗證。",
             wraplength=395,
         ).grid(row=5, columnspan=2, sticky="w", pady=(6, 5))
 
@@ -927,7 +1031,7 @@ class WatcherWindow:
         dialog.resizable(False, False)
         frame = ttk.Frame(dialog, padding=16)
         frame.pack(fill="both", expand=True)
-        config = self.mail_settings or MailSettings("smtp.gmail.com", 465, "SSL/TLS", "", ())
+        config = self.mail_settings or MailSettings(GMAIL_SMTP, 465, "SSL/TLS", "", ())
         variables = [
             tk.StringVar(value=value) for value in (
                 config.host, str(config.port), config.security, config.sender,
@@ -944,18 +1048,27 @@ class WatcherWindow:
             field.grid(row=i, column=1, sticky="ew", pady=4)
 
         remember_password = tk.BooleanVar(value=self.remember_mail_password)
+        reply_verification = tk.BooleanVar(value=config.reply_verification)
         ttk.Label(frame, text="多位收件人以逗號分隔。").grid(
             row=6, columnspan=2, sticky="w", pady=(4, 6),
         )
         ttk.Checkbutton(frame, text="記住應用程式密碼（明文儲存在本機 .env）", variable=remember_password).grid(
             row=7, columnspan=2, sticky="w",
         )
-        ttk.Label(frame, textvariable=self.mail_status, wraplength=490).grid(row=8, columnspan=2, sticky="w")
+        ttk.Checkbutton(frame, text="允許用 Gmail 回信完成簡訊驗證", variable=reply_verification).grid(
+            row=8, columnspan=2, sticky="w",
+        )
+        ttk.Label(frame, text="驗證信會寄到上方的寄件 Gmail，請用同一帳號回覆。").grid(
+            row=9, columnspan=2, sticky="w", pady=(0, 4),
+        )
+        ttk.Label(frame, textvariable=self.mail_status, wraplength=490).grid(row=10, columnspan=2, sticky="w")
 
         def read_fields():
-            settings = MailSettings.from_fields(*(variable.get() for variable in variables[:5]))
+            settings = MailSettings.from_fields(
+                *(variable.get() for variable in variables[:5]), reply_verification=reply_verification.get(),
+            )
             password = variables[5].get() or os.environ.get("ISLAND_SMTP_PASSWORD", "")
-            if settings.host.casefold() == "smtp.gmail.com":
+            if settings.host.casefold() == GMAIL_SMTP:
                 password = password.replace(" ", "")
             return settings, password
 
@@ -991,7 +1104,7 @@ class WatcherWindow:
             threading.Thread(target=send_emails, args=(settings, password, self.events), daemon=True).start()
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=9, columnspan=2, sticky="e", pady=(9, 0))
+        buttons.grid(row=11, columnspan=2, sticky="e", pady=(9, 0))
         self.mail_test_button = ttk.Button(buttons, text="寄送測試信", command=test)
         if self.mail_testing:
             self.mail_test_button.configure(state="disabled")
@@ -1049,7 +1162,7 @@ class WatcherWindow:
                 if not settings:
                     raise ValueError("請先開啟 Email 設定，設定寄件帳號和收件人。")
                 password = self.mail_password or os.environ.get("ISLAND_SMTP_PASSWORD", "")
-                if settings.host.casefold() == "smtp.gmail.com":
+                if settings.host.casefold() == GMAIL_SMTP:
                     password = password.replace(" ", "")
                 if not password:
                     raise ValueError("請在 Email 設定輸入本次執行要用的應用程式密碼。")
@@ -1058,12 +1171,17 @@ class WatcherWindow:
             return
         if booking:
             dates = f"{query.start} 至 {query.end}" if query.start else "不限日期"
+            verification = (
+                "若 inline 要求簡訊驗證，程式會寄信到你的 Gmail，讀取你對該信的回覆並送出驗證碼。"
+                if settings and settings.reply_verification
+                else "若 inline 要求簡訊驗證，請到原本的 Chrome 視窗完成。"
+            )
             approved = messagebox.askyesno(
                 "啟動自動訂位",
                 f"島語 {query.branch}｜{query.adults} 大 {query.kids} 小｜{booking.table}\n"
                 f"{dates}｜{query.day_kind}｜{query.earliest} 至 {query.latest}\n\n"
                 "找到符合條件的第一個場次後，程式會將你的聯絡資料送到 inline，最多送出一筆。"
-                "你仍需在 Chrome 完成簡訊驗證及依店家規則支付訂金。\n\n"
+                f"{verification} 訂金與相關條款請在 Chrome 處理。\n\n"
                 "你已閱讀並同意 inline 服務條款與隱私權條款，並同意啟動這次自動訂位嗎？",
                 parent=self.root,
                 default=messagebox.NO,
