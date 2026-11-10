@@ -31,6 +31,8 @@ uv run --locked --managed-python --python 3.12 python island_inline_watcher.py
 
 監看時需保持程式和 Chrome 開啟。
 
+如果 inline 顯示瀏覽器人機驗證，程式會停止這次監看並保留原本的 Chrome 視窗。請依網頁提示手動完成驗證，可直接在同一頁查詢或訂位。關閉驗證視窗後，可以再次開始監看。[inline 人機驗證說明](https://intercom.help/inlinetocustomer/en/articles/16079045-what-should-i-do-if-i-can-t-pass-human-verification)
+
 ## 下次開啟自動帶入設定
 
 - 「訂位資料」按 **儲存**，下次會帶入姓名、手機、聯絡 Email 和桌型。

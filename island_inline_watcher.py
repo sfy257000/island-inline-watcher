@@ -16,7 +16,7 @@ import tempfile
 import threading
 import tkinter as tk
 import webbrowser
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from email.errors import HeaderParseError
@@ -77,6 +77,22 @@ WEEKDAY_HOLIDAYS = frozenset("""
 2027-09-28 2027-10-11 2027-10-25 2027-12-24 2027-12-31
 """.split())
 
+BROWSER_VERIFICATION = r"""
+() => {
+    const challenge = document.querySelectorAll(
+        '#px-captcha, iframe[title*="human verification" i]',
+    );
+    return [...challenge].some(node => {
+        const {width, height} = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return width > 0 && height > 0 && style.visibility === 'visible' && style.opacity !== '0';
+    }) || /verify (?:you are|that you are) human|human verification|press (?:&|and) hold|人機驗證/.test(
+        document.title.toLowerCase(),
+    );
+}
+"""
+VERIFICATION_DETAIL = "inline 要求瀏覽器人機驗證。"
+
 # Read only the booking form. Inline renders full/waitlist slots as buttons too,
 # with a separate data-cy prefix from slots that can be booked.
 READ_FORM = r"""
@@ -84,11 +100,10 @@ READ_FORM = r"""
     const text = node => (node?.textContent || '').trim();
     const visible = node => node && node.getClientRects().length > 0
         && getComputedStyle(node).visibility === 'visible';
+    const detectBrowserVerification = """ + BROWSER_VERIFICATION + r""";
+    if (detectBrowserVerification()) return {blocked: true};
+
     const form = document.querySelector('#book-now');
-    if (!form && (document.querySelector('#px-captcha, iframe[src*="captcha"]')
-        || /verify (?:you are|that you are) human|press & hold|just a moment/i.test(document.title))) {
-        return {blocked: true};
-    }
 
     const heading = [...document.querySelectorAll('h1')].find(node =>
         text(node).replace(/\s+/g, '') === ('島語' + branch).replace(/\s+/g, ''));
@@ -162,6 +177,7 @@ class Result:
     detail: str = ""
     failed: bool = False
     stop: bool = False
+    needs_verification: bool = False
 
 
 def read_saved_settings(key):
@@ -458,13 +474,17 @@ def check_day(page, query, day):
         else:
             response = page.goto(url, wait_until="domcontentloaded", timeout=25000)
         if response and response.status in (401, 403, 429):
-            return Result(day, detail=f"inline 拒絕或限制存取（HTTP {response.status}）。", failed=True, stop=True)
-        if response and response.status >= 400:
+            try:
+                page.wait_for_function(BROWSER_VERIFICATION, polling=250, timeout=2000)
+            except BrowserTimeout:
+                return Result(day, detail=f"inline 拒絕或限制存取（HTTP {response.status}）。", failed=True, stop=True)
+            state = {"blocked": True}
+        elif response and response.status >= 400:
             return Result(day, detail=f"inline 回傳 HTTP {response.status}。", failed=True)
-
-        state = read_slot_state(page, query, day)
+        else:
+            state = read_slot_state(page, query, day)
         if state.get("blocked"):
-            return Result(day, detail="inline 要求驗證瀏覽器。", failed=True, stop=True)
+            return Result(day, detail=VERIFICATION_DETAIL, failed=True, stop=True, needs_verification=True)
         return Result(day, tuple(state["slots"]), state.get("detail", ""))
     except BrowserTimeout:
         return Result(day, detail="等待 inline 回應逾時，或 inline 未套用指定日期、人數。", failed=True)
@@ -740,6 +760,14 @@ def notify_and_verify_booking(page, settings, password, query, slots, handoff, e
     events.put(("status", detail))
 
 
+def wait_for_chrome(page, cancel):
+    try:
+        while not cancel.is_set() and not page.is_closed():
+            page.wait_for_timeout(300)
+    except BrowserError:
+        pass
+
+
 def run_query(query, repeat, cancel, events, settings=None, password="", booking=None):
     try:
         with sync_playwright() as playwright:
@@ -760,7 +788,7 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                         days = [day for day in days if query.matches_date(day)]
                     round_slots = set()
                     note = "" if days else "剩餘日期不符合目前設定的日期條件。"
-                    halted = False
+                    halted = None
                     handoff = None
                     index = 0
                     while index < len(days):
@@ -779,16 +807,14 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                                 round_slots.update((day, slot) for slot in result.slots)
                             events.put(("result", (result, bool(new_slots))))
                         if result.stop:
-                            halted = True
+                            halted = result
                             break
                         if booking and matches and result.slots:
                             handoff = start_booking(page, query, result, booking, cancel)
                             if handoff:
                                 events.put(("booking", handoff.note))
-                                try:
+                                with suppress(BrowserError):
                                     page.bring_to_front()
-                                except BrowserError:
-                                    pass
                                 break
 
                         if query.start is None and index == 0:
@@ -814,15 +840,18 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                         else:
                             send_emails(settings, password, events, query, round_slots, delivered, cancel)
                     if handoff:
-                        try:
-                            while not cancel.is_set() and not page.is_closed():
-                                page.wait_for_timeout(300)
-                        except BrowserError:
-                            pass
+                        wait_for_chrome(page, cancel)
                         events.put(("status", "訂位視窗已結束，請以 inline 畫面及簡訊通知確認訂位結果。"))
                         return
                     if halted:
-                        events.put(("status", "查詢已停止。可用下方按鈕直接開啟 inline。"))
+                        if halted.needs_verification:
+                            events.put(("verification", "這次查詢已停止。請在原本的 Chrome 視窗完成人機驗證，可直接在該頁手動查詢或訂位。"))
+                            with suppress(BrowserError):
+                                page.bring_to_front()
+                            wait_for_chrome(page, cancel)
+                            events.put(("status", "驗證視窗已關閉。可再次開始查詢。"))
+                        else:
+                            events.put(("status", "查詢已停止。可用下方按鈕直接開啟 inline。"))
                         return
                     if not repeat:
                         events.put(("status", note or "本次查詢完成。"))
@@ -852,7 +881,6 @@ class WatcherWindow:
         self.mail_test_button = None
         self.mail_testing = False
         self.booking_profile = None
-        self.booking_in_progress = False
         mail_hint = "可在 Email 設定中指定寄件帳號及收件人。"
         booking_hint = ""
         try:
@@ -1210,7 +1238,7 @@ class WatcherWindow:
         self.status.set("正在停止。若有查詢進行中，會等這次回應或逾時。")
 
     def open_booking(self):
-        if not self.last_query or self.booking_in_progress:
+        if not self.last_query or self.open.instate(("disabled",)):
             return
         selected = self.rows.selection()
         day = date.fromisoformat(selected[0]) if selected else self.last_query.start or taipei_today()
@@ -1228,11 +1256,15 @@ class WatcherWindow:
             elif kind == "result":
                 self.display_result(*payload)
             elif kind == "booking":
-                self.booking_in_progress = True
                 self.status.set(payload)
                 self.auto_book.set(False)
                 self.open.configure(state="disabled")
                 self.stop.configure(text="關閉訂位視窗")
+                self.root.bell()
+            elif kind == "verification" and not self.cancel.is_set():
+                self.status.set(payload)
+                self.stop.configure(text="關閉驗證視窗")
+                self.open.configure(state="disabled")
                 self.root.bell()
             elif kind == "prune":
                 for row in self.rows.get_children():
@@ -1255,7 +1287,6 @@ class WatcherWindow:
                 self.mail_setup.configure(state="normal")
                 self.booking_setup.configure(state="normal")
                 self.booking_toggle.configure(state="normal")
-                self.booking_in_progress = False
                 if self.cancel.is_set():
                     self.status.set("監看已停止。")
                 self.worker = None
