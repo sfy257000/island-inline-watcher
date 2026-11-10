@@ -29,7 +29,7 @@ uv run --locked --managed-python --python 3.12 python island_inline_watcher.py
 - 要收信，從「Email 設定」設定 SMTP 和收件地址，並勾選「Email 通知」。
 - 要啟動自動訂位，填「訂位資料」，勾選「自動訂位」後再開始監看。「不限桌型」會先嘗試一般座位，再嘗試板前吧台。
 
-監看時需保持程式和 Chrome 開啟。
+監看時需保持程式和 Chrome 開啟。程式每輪會載入一次分店的訂位頁，透過頁面上的人數與日曆選項查詢。查同一輪的其他日期時會沿用該頁。
 
 如果 inline 顯示瀏覽器人機驗證，程式會停止這次監看並保留原本的 Chrome 視窗。請依網頁提示手動完成驗證，可直接在同一頁查詢或訂位。關閉驗證視窗後，可以再次開始監看。[inline 人機驗證說明](https://intercom.help/inlinetocustomer/en/articles/16079045-what-should-i-do-if-i-can-t-pass-human-verification)
 

@@ -25,7 +25,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from time import monotonic
 from tkinter import messagebox, ttk
-from urllib.parse import urlencode, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 from uuid import uuid4
 
 from dotenv import dotenv_values, set_key
@@ -92,6 +92,17 @@ BROWSER_VERIFICATION = r"""
 }
 """
 VERIFICATION_DETAIL = "inline 要求瀏覽器人機驗證。"
+BOOKING_FORM_READY = r"""
+branch => {
+    const detectBrowserVerification = """ + BROWSER_VERIFICATION + r""";
+    if (detectBrowserVerification()) return 'blocked';
+    const heading = [...document.querySelectorAll('h1')].some(node =>
+        node.textContent.replace(/\s+/g, '') === ('島語' + branch).replace(/\s+/g, ''));
+    return heading && !!document.querySelector('#book-now #adult-picker')
+        && !!document.querySelector('#book-now #kid-picker')
+        && !!document.querySelector('#book-now #date-picker');
+}
+"""
 
 # Read only the booking form. Inline renders full/waitlist slots as buttons too,
 # with a separate data-cy prefix from slots that can be booked.
@@ -157,6 +168,9 @@ class Query:
             return False
         holiday = weekend or day.isoformat() in WEEKDAY_HOLIDAYS
         return holiday == (self.day_kind == DAY_OPTIONS[2])
+
+    def booking_url(self):
+        return f"{BOOKING_ROOT}/{BRANCHES[self.branch]}?language=zh-tw"
 
     def url(self, day):
         payload = {
@@ -466,32 +480,117 @@ def read_slot_state(page, query, day, timeout=20000):
     ).json_value()
 
 
-def check_day(page, query, day):
+def verification_result(day):
+    return Result(day, detail=VERIFICATION_DETAIL, failed=True, stop=True, needs_verification=True)
+
+
+def active_browser_stop(page, day):
+    if page.is_closed():
+        return Result(day, detail="查詢用的 Chrome 視窗已關閉。", failed=True, stop=True)
+    with suppress(BrowserError):
+        if page.evaluate(BROWSER_VERIFICATION):
+            return verification_result(day)
+    return None
+
+
+def open_calendar(page):
+    calendar = page.locator(CALENDAR)
+    picker = page.locator("#book-now #date-picker")
+    if picker.get_attribute("aria-expanded", timeout=4000) == "false":
+        picker.click(timeout=5000)
+    calendar.wait_for(state="visible", timeout=5000)
+    return calendar
+
+
+def calendar_month(calendar):
+    label = calendar.locator("h4").first.inner_text(timeout=3000)
+    match = re.fullmatch(r"\s*(\d{4})年\s*(\d{1,2})月\s*", label)
+    if not match:
+        raise ValueError("無法辨識 inline 的月份")
+    return int(match[1]), int(match[2])
+
+
+def move_calendar(page, calendar, direction):
+    button = calendar.locator(f'.{direction}Month:visible:not([disabled]):not([aria-disabled="true"])')
+    if not button.count():
+        return False
+    previous = calendar.locator("h4").first.inner_text(timeout=3000)
+    button.click(timeout=5000)
+    page.wait_for_function(
+        "(previous) => { const h = document.querySelector('#calendar-picker h4'); return h && h.innerText !== previous; }",
+        arg=previous,
+        timeout=5000,
+    )
+    return True
+
+
+def select_booking_date(page, day, cancel):
+    calendar = open_calendar(page)
+    target_month = (day.year, day.month)
+    for _ in range(CALENDAR_MONTHS):
+        if cancel.is_set():
+            return False
+        month = calendar_month(calendar)
+        if month == target_month:
+            target = calendar.locator(f'{AVAILABLE_DAY}[data-date="{day.isoformat()}"]:visible')
+            if target.count():
+                target.click(timeout=5000)
+                return True
+            break
+        direction = "next" if month < target_month else "prev"
+        if not move_calendar(page, calendar, direction):
+            break
+    page.locator('#date-picker[aria-expanded="true"]').click(timeout=5000)
+    return False
+
+
+def check_day(page, query, day, cancel, *, refresh):
     try:
-        url = query.url(day)
-        if page.url == url:
-            response = page.reload(wait_until="domcontentloaded", timeout=25000)
-        else:
+        stopped = active_browser_stop(page, day)
+        if stopped or cancel.is_set():
+            return stopped or Result(day, failed=True)
+        url = query.booking_url()
+        booking = urlparse(url)
+        current = urlparse(page.url)
+        same_branch = (
+            current.scheme == booking.scheme and current.netloc == booking.netloc
+            and unquote(current.path).rstrip("/") == booking.path
+        )
+        response = None
+        if not same_branch:
             response = page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        elif refresh:
+            response = page.reload(wait_until="domcontentloaded", timeout=25000)
         if response and response.status in (401, 403, 429):
             try:
                 page.wait_for_function(BROWSER_VERIFICATION, polling=250, timeout=2000)
             except BrowserTimeout:
                 return Result(day, detail=f"inline 拒絕或限制存取（HTTP {response.status}）。", failed=True, stop=True)
-            state = {"blocked": True}
-        elif response and response.status >= 400:
+            return verification_result(day)
+        if response and response.status >= 400:
             return Result(day, detail=f"inline 回傳 HTTP {response.status}。", failed=True)
-        else:
-            state = read_slot_state(page, query, day)
+
+        ready = page.wait_for_function(BOOKING_FORM_READY, arg=query.branch, polling=250, timeout=20000).json_value()
+        if ready == "blocked":
+            return verification_result(day)
+        for field, count in (("adult-picker", query.adults), ("kid-picker", query.kids)):
+            if cancel.is_set():
+                return Result(day, failed=True)
+            picker = page.locator(f"#book-now #{field}")
+            if picker.input_value(timeout=4000) != str(count):
+                picker.select_option(value=str(count), timeout=5000)
+        if cancel.is_set():
+            return Result(day, failed=True)
+        if not select_booking_date(page, day, cancel):
+            return active_browser_stop(page, day) or Result(day, detail="inline 日曆未開放這一天。")
+        state = read_slot_state(page, query, day)
         if state.get("blocked"):
-            return Result(day, detail=VERIFICATION_DETAIL, failed=True, stop=True, needs_verification=True)
+            return verification_result(day)
         return Result(day, tuple(state["slots"]), state.get("detail", ""))
     except BrowserTimeout:
-        return Result(day, detail="等待 inline 回應逾時，或 inline 未套用指定日期、人數。", failed=True)
-    except BrowserError:
-        if page.is_closed():
-            return Result(day, detail="查詢用的 Chrome 視窗已關閉。", failed=True, stop=True)
-        return Result(day, detail="讀取 inline 訂位頁失敗。", failed=True)
+        return active_browser_stop(page, day) or Result(day, detail="等待 inline 回應逾時，或 inline 未套用指定日期、人數。", failed=True)
+    except (BrowserError, ValueError):
+        return active_browser_stop(page, day) or Result(day, detail="讀取 inline 訂位頁失敗。", failed=True)
 
 
 def calendar_dates(page, query, today, cancel):
@@ -511,29 +610,8 @@ def calendar_dates(page, query, today, cancel):
         if match:
             remaining = int(match[1])
 
-    page.locator('#date-picker[aria-expanded="false"]').click(timeout=5000)
-    calendar = page.locator(CALENDAR)
-    calendar.wait_for(state="visible", timeout=5000)
-    header = calendar.locator("h4").first
-    prev_button = calendar.locator('.prevMonth:visible:not([disabled]):not([aria-disabled="true"])')
-    next_button = calendar.locator('.nextMonth:visible:not([disabled]):not([aria-disabled="true"])')
-
-    def move(button):
-        old_month = header.inner_text(timeout=3000)
-        button.click(timeout=5000)
-        page.wait_for_function(
-            "(old) => { const h = document.querySelector('#calendar-picker h4'); return h && h.innerText !== old; }",
-            arg=old_month,
-            timeout=5000,
-        )
-
-    def month_key(label):
-        match = re.fullmatch(r"\s*(\d{4})年\s*(\d{1,2})月\s*", label)
-        if not match:
-            raise ValueError("無法辨識 inline 的月份")
-        return int(match[1]), int(match[2])
-
-    first_month = month_key(header.inner_text(timeout=3000))
+    calendar = open_calendar(page)
+    first_month = calendar_month(calendar)
     picked = page.locator("#date-picker").inner_text(timeout=3000)
     if not picked.startswith(f"{today.month}月{today.day}日"):
         remaining = None
@@ -548,11 +626,11 @@ def calendar_dates(page, query, today, cancel):
     for _ in range(CALENDAR_MONTHS):
         if cancel.is_set():
             return [], ""
-        if month_key(header.inner_text(timeout=3000)) <= (today.year, today.month):
+        month = calendar_month(calendar)
+        if month <= (today.year, today.month):
             break
-        if not prev_button.count():
+        if not move_calendar(page, calendar, "prev"):
             return sorted(days), "無法回到本月，部分日期可能未查到。"
-        move(prev_button)
     else:
         return sorted(days), "無法回到本月，部分日期可能未查到。"
 
@@ -563,9 +641,8 @@ def calendar_dates(page, query, today, cancel):
         days.update(day for value in visible_dates if today < (day := date.fromisoformat(value)) < limit)
         if remaining is not None and len(days) >= remaining:
             break
-        if index == CALENDAR_MONTHS - 1 or not next_button.count():
+        if index == CALENDAR_MONTHS - 1 or not move_calendar(page, calendar, "next"):
             break
-        move(next_button)
     if remaining is not None and len(days) < remaining and not cancel.is_set():
         return sorted(days), "inline 公布的可訂日期數與日曆不一致，部分日期可能未查到。"
     return sorted(days), ""
@@ -796,7 +873,7 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                             return
                         day = days[index]
                         events.put(("status", f"正在查詢 {query.branch} {day.isoformat()}…"))
-                        result = matching_times(query, check_day(page, query, day))
+                        result = matching_times(query, check_day(page, query, day, cancel, refresh=index == 0))
                         if cancel.is_set():
                             return
                         matches = query.matches_date(day)
@@ -830,6 +907,10 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                                             if result.failed and matches else "目前沒有顯示符合條件的可訂日期或時段。"
                                         )
                             except (BrowserError, ValueError):
+                                halted = active_browser_stop(page, day)
+                                if halted:
+                                    events.put(("result", (halted, False)))
+                                    break
                                 note = "本輪未能完整讀取 inline 日曆。"
                         index += 1
                         if index < len(days) and cancel.wait(4):
