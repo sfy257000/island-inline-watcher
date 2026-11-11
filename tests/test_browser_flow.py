@@ -38,6 +38,9 @@ FIXTURE = r"""
   <button data-cy="book-now-action-button">完成預訂</button>
 </div></section>
 <form id="contact-form" style="display:none">
+  <label><input type="radio" name="salutation" value="1" checked>小姐</label>
+  <label><input type="radio" name="salutation" value="0">先生</label>
+  <label><input type="radio" name="salutation" value="2">其他</label>
   <select><option>Taiwan +886</option></select>
   <input data-cy="familyName"><input data-cy="givenName"><input data-cy="phone"><input data-cy="email">
   <button data-cy="submit" type="button">確認訂位</button>
@@ -278,6 +281,85 @@ class BrowserTests(unittest.TestCase):
         self.assertIsNotNone(handoff)
         self.assertIn('已停止自動訂位', handoff.note)
         self.assertEqual(self.page.evaluate('actions.map(a => a.text)'), ['一般'])
+
+    def test_booking_waits_for_delayed_country_and_fills_contact_fields(self):
+        self.page.evaluate("""() => {
+            const form = document.querySelector('#contact-form');
+            const country = form.querySelector('select');
+            country.name = 'country-code';
+            country.replaceChildren();
+            const unrelated = document.createElement('select');
+            unrelated.innerHTML = '<option>Other setting</option>';
+            form.prepend(unrelated);
+            window.contactState = {};
+            form.querySelectorAll('input[data-cy]').forEach(input => {
+                input.disabled = true;
+                input.addEventListener('input', () => window.contactState[input.dataset.cy] = input.value);
+            });
+            const phone = form.querySelector('[data-cy="phone"]');
+            phone.type = 'tel';
+            phone.addEventListener('input', () => {
+                phone.value = phone.value.replace(/^0/, '');
+                window.contactState.phone = phone.value;
+            });
+            document.addEventListener('click', event => {
+                if (event.target.matches('[data-cy="book-now-action-button"]')) {
+                    setTimeout(() => {
+                        country.innerHTML = '<option value="US">United States +1</option><option value="TW">Taiwan +886</option>';
+                        form.querySelectorAll('input[data-cy]').forEach(input => input.disabled = false);
+                    }, 400);
+                }
+            });
+        }""")
+        handoff = self.booking()
+        self.assertTrue(handoff.submitted, handoff)
+        self.assertEqual(self.page.evaluate('contactState'), {
+            'familyName': PROFILE.family_name, 'givenName': PROFILE.given_name,
+            'phone': PROFILE.phone[1:], 'email': PROFILE.email,
+        })
+        self.assertEqual(self.page.locator('select[name="country-code"]').input_value(), 'TW')
+        self.assertEqual(self.page.evaluate('submitted'), 1)
+
+    def test_selected_salutation_is_applied_to_contact_form(self):
+        for salutation in app.SALUTATIONS:
+            with self.subTest(salutation=salutation):
+                self.page.evaluate("document.querySelector('#contact-form').style.display='block'")
+                app.fill_booking_contact(self.page, replace(PROFILE, salutation=salutation),
+                                         self.cancel, self.flow)
+                label = self.page.evaluate("() => document.querySelector('#contact-form input[type=radio]:checked').closest('label').innerText.trim()")
+                self.assertEqual(label, salutation)
+
+    def test_reply_reconnects_then_pastes_code_into_original_sms_dialog_once(self):
+        import booking_verification as verification
+        from unittest.mock import Mock
+        self.page.evaluate('''() => {
+            const dialog=document.createElement('div');
+            dialog.dataset.cy='phone-verification-container';
+            for(let i=0;i<4;i++) {const input=document.createElement('input'); input.dataset.cy='phone-code-'+i; dialog.append(input);}
+            window.otpSubmissions=0;
+            dialog.addEventListener('paste', event => {
+                event.preventDefault();
+                const code=event.clipboardData.getData('text/plain');
+                dialog.querySelectorAll('input').forEach((input,index) => input.value=code[index]);
+                window.otpSubmissions++;
+            });
+            document.body.append(dialog);
+        }''')
+        checkout = self.page.query_selector('form#contact-form')
+        challenge = verification.find_challenge(self.page, checkout, self.page.url, self.cancel, timeout=1)
+        self.assertIsNotNone(challenge)
+        settings = app.MailSettings('smtp.gmail.com', 465, 'SSL/TLS', 'test@gmail.com', ('test@gmail.com',), True)
+        retried = Mock()
+        with (patch.object(verification, 'gmail_mailbox') as mailbox,
+              patch.object(verification, 'find_reply', side_effect=[TimeoutError('temporary'), '0042'])):
+            submitted = verification.wait_for_reply(settings, 'test-password', '<test@gmail.com>',
+                time.monotonic()+15, self.cancel, challenge, on_retry=retried)
+        self.assertTrue(submitted)
+        retried.assert_called_once()
+        self.assertEqual(mailbox.call_count, 2)
+        self.assertEqual(self.page.locator(verification.OTP_INPUTS).evaluate_all('nodes => nodes.map(n => n.value)'),
+                         ['0', '0', '4', '2'])
+        self.assertEqual(self.page.evaluate('otpSubmissions'), 1)
 
 
 class BrowserProfileTests(unittest.TestCase):

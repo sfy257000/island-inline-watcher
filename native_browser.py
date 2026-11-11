@@ -311,6 +311,9 @@ class NativeLocator:
     def first(self):
         return NativeLocator(self.page, self.steps + [('index', 0)])
 
+    def nth(self, index):
+        return NativeLocator(self.page, self.steps + [('index', index)])
+
     def get_by_role(self, role, *, name, exact=False):
         return NativeLocator(self.page, self.steps + [('role', {'role': role, 'name': name, 'exact': exact})])
 

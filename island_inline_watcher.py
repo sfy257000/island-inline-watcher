@@ -42,7 +42,7 @@ except ImportError:
     sync_playwright = None
 
 TAIPEI = timezone(timedelta(hours=8))
-APP_VERSION = "v1.00"
+APP_VERSION = "v1.01"
 BOOKING_ROOT = "https://inline.app/booking/-NeqTSgDQOAYi30lg4a7:inline-live-3"
 BRANCHES = {
     "台北漢來店": "-NeqTStJZDIBQHEMSDI8",
@@ -68,6 +68,7 @@ DAY_OPTIONS = ("不限", "只限週六、週日", "台灣放假日（2026–2027
 ANY_TABLE = "不限桌型"
 TABLE_TYPES = ("一般", "板前吧台")
 TABLE_OPTIONS = (ANY_TABLE, *TABLE_TYPES)
+SALUTATIONS = ("先生", "小姐", "其他")
 INLINE_TERMS = "https://inline.app/tos"
 INLINE_PRIVACY = "https://inline.app/privacy"
 # Weekday exceptions from the DGPA 2026 and 2027 government office calendar CSVs.
@@ -262,9 +263,10 @@ class BookingProfile:
     phone: str
     email: str
     table: str
+    salutation: str = SALUTATIONS[2]
 
     @classmethod
-    def from_fields(cls, family_name, given_name, phone, email, table):
+    def from_fields(cls, family_name, given_name, phone, email, table, salutation=SALUTATIONS[2]):
         family_name, given_name = family_name.strip(), given_name.strip()
         if not family_name or not given_name:
             raise ValueError("請填寫訂位人的姓和名。")
@@ -282,7 +284,9 @@ class BookingProfile:
                 raise ValueError("請輸入完整的聯絡 Email。") from None
         if table not in TABLE_OPTIONS:
             raise ValueError("請選擇用餐桌型。")
-        return cls(family_name, given_name, phone, email, table)
+        if salutation not in SALUTATIONS:
+            raise ValueError("請選擇先生、小姐或其他。")
+        return cls(family_name, given_name, phone, email, table, salutation)
 
     @classmethod
     def load(cls):
@@ -890,6 +894,87 @@ def wait_booking_summary(page, action, query, day, time, table, flow):
     return False
 
 
+CONTACT_FORM_READY = r"""
+expectedCountry => {
+    const detectBrowserVerification = """ + BROWSER_VERIFICATION + r""";
+    if (detectBrowserVerification()) return {blocked: true};
+    const form = document.querySelector('form#contact-form');
+    const visible = node => !!node?.getClientRects().length && getComputedStyle(node).visibility === 'visible';
+    if (!visible(form)) return false;
+    const fields = ['familyName', 'givenName', 'phone', 'email'];
+    if (!fields.every(field => {
+        const input = form.querySelector('input[data-cy="' + field + '"]');
+        return visible(input) && !input.disabled && !input.readOnly;
+    })) return false;
+    const selects = [...form.querySelectorAll('select')];
+    const country = selects.find(select => select.name === 'country-code')
+        || selects.find(select => [...select.options].some(option =>
+            option.textContent.replace(/\s+/g, '') === 'Taiwan+886'));
+    if (!visible(country) || country.disabled) return false;
+    const taiwan = [...country.options].find(option => !option.disabled
+        && option.textContent.replace(/\s+/g, '') === 'Taiwan+886');
+    if (!taiwan || !country.selectedOptions.length) return false;
+    if (expectedCountry !== null && country.value !== expectedCountry) return false;
+    return {countryIndex: selects.indexOf(country), countryValue: taiwan.value,
+            selectedValue: country.value};
+}
+"""
+
+
+def fill_booking_contact(page, profile, cancel, flow):
+    form = page.locator('form#contact-form:visible')
+    state = page.wait_for_function(CONTACT_FORM_READY, polling=100, timeout=15000).json_value()
+    if state.get('blocked'):
+        raise BrowserVerificationRequired
+    if flow.trace:
+        flow.trace.record('state_ready', '聯絡表單與手機國碼已就緒')
+    if state['selectedValue'] != state['countryValue']:
+        country = form.locator('select').nth(state['countryIndex'])
+        flow.perform('設定手機國碼', lambda: country.select_option(value=state['countryValue'], timeout=5000))
+        state = page.wait_for_function(CONTACT_FORM_READY, arg=state['countryValue'],
+                                       polling=100, timeout=5000).json_value()
+        if state.get('blocked'):
+            raise BrowserVerificationRequired
+    if form.locator('input[type="radio"]').count():
+        salutation = form.locator('label:has(input[type="radio"])').filter(
+            has_text=re.compile(rf'^\s*{re.escape(profile.salutation)}\s*$'),
+        )
+        flow.perform('選擇稱謂', lambda: salutation.click(timeout=5000))
+        checked = salutation.locator('input[type="radio"]').evaluate('input => input.checked')
+        if not checked:
+            raise BrowserError('Could not confirm the selected salutation')
+    fields = {
+        'familyName': profile.family_name, 'givenName': profile.given_name,
+        'phone': profile.phone, 'email': profile.email,
+    }
+    for field, value in fields.items():
+        if cancel.is_set():
+            raise BrowserOperationCancelled
+        if value:
+            flow.perform('填寫聯絡資料', lambda: form.locator(f'input[data-cy="{field}"]').fill(value, timeout=5000))
+    ready = page.wait_for_function(
+        r"""expected => {
+            const detectBrowserVerification = """ + BROWSER_VERIFICATION + r""";
+            if (detectBrowserVerification()) return 'blocked';
+            const form = document.querySelector('form#contact-form');
+            return !!form && Object.entries(expected).every(([field, value]) => {
+                if (!value) return true;
+                const actual = form.querySelector('input[data-cy="' + field + '"]')?.value;
+                if (typeof actual !== 'string') return false;
+                if (field === 'phone') {
+                    const localNumber = number => number.replace(/\D/g, '').replace(/^0/, '');
+                    return localNumber(actual) === localNumber(value);
+                }
+                return actual === value;
+            });
+        }""", arg=fields, polling=100, timeout=5000,
+    ).json_value()
+    if ready == 'blocked':
+        raise BrowserVerificationRequired
+    if flow.trace:
+        flow.trace.record('state_ready', '聯絡資料已核對')
+
+
 def start_booking(page, query, result, profile, cancel, *, flow=None, preview=False):
     """Open one contact form and submit it once, then describe the handoff."""
     flow = flow or BrowserFlow(page, cancel)
@@ -968,23 +1053,7 @@ def start_booking(page, query, result, profile, cancel, *, flow=None, preview=Fa
         check_booking_verification(page)
         stage = "填寫聯絡資料"
         verification_url = page.url
-        country = form.evaluate(
-            """form => [...form.querySelectorAll('select')].find(select =>
-                [...select.options].some(option => option.textContent.trim() === 'Taiwan +886')
-            )?.selectedOptions[0]?.textContent.trim()""",
-            timeout=3000,
-        )
-        if country != "Taiwan +886":
-            return BookingHandoff("已開啟訂位表單，請到 Chrome 確認手機國碼。", verification_url)
-
-        for field, value in (
-            ("familyName", profile.family_name), ("givenName", profile.given_name),
-            ("phone", profile.phone), ("email", profile.email),
-        ):
-            if cancel.is_set():
-                return None
-            if value:
-                flow.perform(stage, lambda: form.locator(f'input[data-cy="{field}"]').fill(value, timeout=5000))
+        fill_booking_contact(page, profile, cancel, flow)
         check_booking_verification(page)
         deposit_policy = form.locator('#deposit-policy:visible')
         if deposit_policy.count():
@@ -1060,7 +1129,10 @@ def notify_and_verify_booking(page, settings, password, query, slots, handoff, e
 
     events.put(("status", f"正在等 Gmail 回信。請回覆原信，第一行只填簡訊上的 {CODE_LENGTH} 位數字。"))
     try:
-        submitted = wait_for_reply(settings, password, message_id, deadline, cancel, challenge)
+        submitted = wait_for_reply(
+            settings, password, message_id, deadline, cancel, challenge,
+            on_retry=lambda: events.put(("status", "Gmail 連線暫時中斷，正在重新連線等候回信…")),
+        )
         detail = (
             "已送出回信中的驗證碼。請查看 Chrome 或 inline 通知確認訂位結果。"
             if submitted else "已結束等候回信。請到原本的 Chrome 視窗查看或手動驗證。"
@@ -1364,13 +1436,15 @@ class WatcherWindow:
         profile = self.booking_profile or BookingProfile("", "", "", "", ANY_TABLE)
         variables = [tk.StringVar(value=value) for value in (
             profile.family_name, profile.given_name, profile.phone, profile.email, profile.table,
+            profile.salutation,
         )]
         for row, (label, variable) in enumerate(zip(
-            ("姓", "名", "台灣手機", "聯絡 Email（選填）", "桌型"), variables,
+            ("姓", "名", "台灣手機", "聯絡 Email（選填）", "桌型", "稱謂"), variables,
         )):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
-            if row == 4:
-                widget = ttk.Combobox(frame, textvariable=variable, values=TABLE_OPTIONS, state="readonly")
+            if row in (4, 5):
+                choices = TABLE_OPTIONS if row == 4 else SALUTATIONS
+                widget = ttk.Combobox(frame, textvariable=variable, values=choices, state="readonly")
             else:
                 widget = ttk.Entry(frame, textvariable=variable, width=40)
             widget.grid(row=row, column=1, sticky="ew", pady=4)
@@ -1378,10 +1452,10 @@ class WatcherWindow:
             frame,
             text="儲存後下次會自動帶入。可在 Email 設定開啟簡訊回信驗證。",
             wraplength=395,
-        ).grid(row=5, columnspan=2, sticky="w", pady=(6, 5))
+        ).grid(row=6, columnspan=2, sticky="w", pady=(6, 5))
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=6, columnspan=2, sticky="e", pady=(6, 0))
+        buttons.grid(row=7, columnspan=2, sticky="e", pady=(6, 0))
         ttk.Button(buttons, text="inline 服務條款", command=lambda: webbrowser.open(INLINE_TERMS)).pack(
             side="left", padx=(0, 6),
         )
