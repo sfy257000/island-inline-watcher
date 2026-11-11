@@ -42,7 +42,7 @@ except ImportError:
     sync_playwright = None
 
 TAIPEI = timezone(timedelta(hours=8))
-APP_VERSION = "v1.02"
+APP_VERSION = "v1.03"
 BOOKING_ROOT = "https://inline.app/booking/-NeqTSgDQOAYi30lg4a7:inline-live-3"
 BRANCHES = {
     "台北漢來店": "-NeqTStJZDIBQHEMSDI8",
@@ -640,9 +640,18 @@ def active_browser_stop(page, day, stage):
 def open_calendar(page, flow):
     calendar = page.locator(CALENDAR)
     picker = page.locator("#book-now #date-picker")
-    if picker.get_attribute("aria-expanded", timeout=4000) == "false":
-        flow.perform("展開日曆", lambda: picker.click(timeout=5000))
-    calendar.wait_for(state="visible", timeout=5000)
+    for attempt in range(3):
+        if picker.get_attribute("aria-expanded", timeout=4000) == "false":
+            flow.perform("展開日曆", lambda: picker.click(timeout=5000))
+        try:
+            calendar.wait_for(state="visible", timeout=2000)
+            break
+        except BrowserTimeout:
+            flow.check()
+            # Retry only an opening click that did not take effect. Never
+            # toggle an already-expanded picker and accidentally close it.
+            if attempt == 2 or picker.get_attribute("aria-expanded") != "false":
+                raise
     return calendar
 
 
@@ -830,16 +839,19 @@ def calendar_dates(page, query, today, cancel, *, flow=None):
         if cancel.is_set():
             break
         flow.check()
-        previous_count = len(days)
         visible_dates = calendar.locator(AVAILABLE_DAY).evaluate_all("nodes => nodes.map(n => n.dataset.date)")
         days.update(day for value in visible_dates if today <= (day := date.fromisoformat(value)) < limit)
         other_days = days - {selected_day}
+        if flow.trace:
+            flow.trace.record("calendar_scan", "掃描可訂日期", month=calendar_month(calendar),
+                              advertised_count=remaining, found_count=len(other_days))
         if remaining is not None and len(other_days) >= remaining:
             return sorted(days), ""
         if remaining is None:
             return sorted(days), "已讀取目前日曆的可訂日期；網站未提供日期總數，未自動翻月，掃描可能不完整。"
-        if index > 0 and len(days) == previous_count:
-            break
+        # Empty intermediate months do not mean later months are full. Keep
+        # following the site's next-month control until its advertised count
+        # is reached or the bounded calendar range ends.
         if index == CALENDAR_MONTHS - 1 or not move_calendar(page, calendar, "next", flow):
             break
     return sorted(days), "日曆與公布的可訂日期數不一致，已停止翻月，掃描可能不完整。"
@@ -1241,7 +1253,8 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                                     )
                         except BrowserOperationCancelled:
                             return
-                        except (BrowserError, ValueError, BrowserVerificationRequired):
+                        except (BrowserError, ValueError, BrowserVerificationRequired) as exc:
+                            trace.record("calendar_scan_failed", "掃描其他可訂日期", reason=type(exc).__name__)
                             halted = active_browser_stop(page, day, "掃描其他可訂日期")
                             halted = halted or Result(day, detail="掃描日曆失敗，本輪查詢未完成。",
                                                       failed=True, stop=True, retryable=True)

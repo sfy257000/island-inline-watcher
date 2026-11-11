@@ -212,6 +212,53 @@ class BrowserTests(unittest.TestCase):
         self.assertNotIn("+", self.page.evaluate("actions.map(a => a.text)"))
         self.assertNotIn("-", self.page.evaluate("actions.map(a => a.text)"))
 
+    def test_calendar_reaches_later_availability_across_empty_months(self):
+        self.page.evaluate('''() => {
+            const summary=document.createElement('p');
+            summary.dataset.cy='see-other-dates-or-pax';
+            summary.innerText='預定其他日期\\n還有 4 個日期可選';
+            document.querySelector('#book-now').append(summary);
+            const calendar=document.querySelector('#calendar-picker');
+            calendar.querySelectorAll('[data-date]').forEach(n=>n.remove());
+            window.monthMoves=0;
+            document.addEventListener('click',event=>{
+                if (!event.target.matches('.nextMonth')) return;
+                event.stopImmediatePropagation();
+                window.monthMoves++;
+                const month=11+window.monthMoves;
+                calendar.querySelector('h4').innerText=month===12?'2026年12月':'2027年1月';
+                calendar.querySelectorAll('[data-date]').forEach(n=>n.remove());
+                if(window.monthMoves===2) {
+                    for(const day of ['06','08','09','10']) {
+                        const button=document.createElement('button');
+                        button.dataset.cy='bt-cal-day';
+                        button.dataset.date='2027-02-'+day;
+                        button.innerText=day;
+                        calendar.append(button);
+                    }
+                }
+            },true);
+        }''')
+        days,note=app.calendar_dates(self.page,replace(QUERY,start=None,end=None),
+                                     date(2026,11,10),self.cancel,flow=self.flow)
+        self.assertEqual(days,[DAY,date(2027,2,6),date(2027,2,8),date(2027,2,9),date(2027,2,10)])
+        self.assertEqual(note,'')
+        self.assertEqual(self.page.evaluate('monthMoves'),2)
+
+    def test_calendar_retries_opening_click_that_did_not_expand(self):
+        self.page.evaluate('''() => {
+            window.calendarOpenAttempts=0;
+            document.addEventListener('click',event=>{
+                if(event.target.id!=='date-picker') return;
+                window.calendarOpenAttempts++;
+                if(window.calendarOpenAttempts===1) event.stopImmediatePropagation();
+            },true);
+        }''')
+        calendar=app.open_calendar(self.page,self.flow)
+        self.assertTrue(calendar.is_visible())
+        self.assertEqual(self.page.locator('#date-picker').get_attribute('aria-expanded'),'true')
+        self.assertEqual(self.page.evaluate('calendarOpenAttempts'),2)
+
     def test_visible_second_month_needs_no_month_navigation(self):
         self.page.evaluate("""() => {
             document.querySelector('#calendar-picker').insertAdjacentHTML('beforeend',
