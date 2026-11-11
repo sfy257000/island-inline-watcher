@@ -42,7 +42,7 @@ except ImportError:
     sync_playwright = None
 
 TAIPEI = timezone(timedelta(hours=8))
-APP_VERSION = "v1.01"
+APP_VERSION = "v1.02"
 BOOKING_ROOT = "https://inline.app/booking/-NeqTSgDQOAYi30lg4a7:inline-live-3"
 BRANCHES = {
     "台北漢來店": "-NeqTStJZDIBQHEMSDI8",

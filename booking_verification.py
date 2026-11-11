@@ -70,6 +70,11 @@ def parse_reply(raw_message, sender, message_id):
 
 
 def find_reply(client, sender, message_id, seen):
+    # Gmail's selected mailbox can keep the old message list across SEARCHes.
+    # Poll for EXISTS updates before searching for replies that arrived later.
+    status, _ = client.noop()
+    if status != "OK":
+        raise imaplib.IMAP4.abort("Could not refresh mailbox")
     # Gmail can time out searching an arbitrary header across All Mail. Search
     # its indexed date/sender fields, then inspect reply headers locally.
     since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%d-%b-%Y')

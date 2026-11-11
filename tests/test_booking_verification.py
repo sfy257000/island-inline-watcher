@@ -26,6 +26,7 @@ def reply(code='0042', sender=SENDER, message_id=MESSAGE_ID):
 class ReplyTests(unittest.TestCase):
     def test_search_filters_recent_sender_then_fetches_only_matching_reply_body(self):
         client = Mock()
+        client.noop.return_value = ('OK', [b''])
         matching = reply()
         other = reply(message_id='<different@example.com>')
         def uid(command, *args):
@@ -44,6 +45,33 @@ class ReplyTests(unittest.TestCase):
         seen = set()
         self.assertEqual(verification.find_reply(client, SENDER, MESSAGE_ID, seen), '0042')
         self.assertEqual(seen, {b'1', b'2'})
+
+    def test_new_reply_is_visible_only_after_refreshing_the_held_mailbox(self):
+        client = Mock()
+        state = {'delivered':False, 'visible':False}
+        raw = reply()
+        def refresh():
+            state['visible'] = state['delivered']
+            return 'OK', [b'']
+        def uid(command, *args):
+            if command == 'SEARCH':
+                return 'OK', [b'1' if state['visible'] else b'']
+            return 'OK', [(b'message', raw)]
+        client.noop.side_effect = refresh
+        client.uid.side_effect = uid
+        seen = set()
+        self.assertIsNone(verification.find_reply(client, SENDER, MESSAGE_ID, seen))
+        state['delivered'] = True
+        self.assertEqual(verification.find_reply(client, SENDER, MESSAGE_ID, seen), '0042')
+        self.assertEqual(client.noop.call_count, 2)
+        self.assertEqual(seen, {b'1'})
+
+    def test_failed_mailbox_refresh_requests_reconnection(self):
+        client = Mock()
+        client.noop.return_value = ('NO', [b'temporary'])
+        with self.assertRaises(verification.imaplib.IMAP4.abort):
+            verification.find_reply(client, SENDER, MESSAGE_ID, set())
+        client.uid.assert_not_called()
 
     def test_wrong_sender_or_other_notification_is_rejected(self):
         for raw in (reply(sender='other@gmail.com'), reply(message_id='<different@example.com>'), reply(code='12345')):
