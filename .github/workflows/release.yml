@@ -1,0 +1,66 @@
+name: Publish release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - RELEASE_NOTES.md
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Package Windows launcher
+        id: package
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tomllib
+          import zipfile
+
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)*', version):
+              raise SystemExit('The release version must contain numbers separated by dots.')
+          tag = f'v{version}'
+          prefix = f'island-inline-watcher-{tag}/'
+          asset = f'island-inline-watcher-{tag}-windows.zip'
+          subprocess.run(['git', 'archive', '--format=zip', f'--prefix={prefix}',
+                          f'--output={asset}', 'HEAD'], check=True)
+          with zipfile.ZipFile(asset) as archive:
+              files = {name.removeprefix(prefix) for name in archive.namelist()}
+          required = {'start.bat', 'island_inline_watcher.py', 'native_browser.py',
+                      'booking_verification.py', 'pyproject.toml', 'uv.lock', 'README.md'}
+          if not required <= files:
+              raise SystemExit('The package is missing required startup files.')
+          private = {'.env', '.tools', '.venv', 'logs', '.browser-profile', '.browser-native-profile'}
+          if any(Path(name).parts[0] in private for name in files if name):
+              raise SystemExit('The package contains local settings or browser data.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'tag={tag}\nasset={asset}\n')
+          PY
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+          ASSET: ${{ steps.package.outputs.asset }}
+        run: |
+          gh release create "$TAG" "$ASSET" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file RELEASE_NOTES.md \
+            --latest
