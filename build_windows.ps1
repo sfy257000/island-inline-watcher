@@ -44,6 +44,7 @@ try {
     Invoke-Checked $python @('tools/check_bundle.py', 'dist/IslandInlineWatcher')
     $compilerArgs = @("/DAppVersion=$version", "/DAppFileVersion=$fileVersion")
     if ($CertificateThumbprint) {
+        New-Item -ItemType Directory -Force 'build/signed-uninstaller' | Out-Null
         $CertificateThumbprint = $CertificateThumbprint -replace '\s', ''
         if ($CertificateThumbprint -notmatch '^[a-fA-F0-9]{40}$') { throw 'Invalid certificate thumbprint.' }
         if ($TimestampUrl -notmatch '^https?://[a-zA-Z0-9./:_-]+$') { throw 'Invalid timestamp URL.' }

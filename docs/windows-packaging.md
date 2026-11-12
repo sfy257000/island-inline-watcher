@@ -13,7 +13,7 @@
 
 ## 本機建置
 
-在 Windows x64 安裝 Git、uv 與 Inno Setup 6.4 以上或 7，再從專案根目錄執行：
+在 Windows x64 安裝 Git、uv 與 Inno Setup 6.5 以上或 7，再從專案根目錄執行：
 
 ```powershell
 .\build_windows.ps1
@@ -75,3 +75,7 @@ Microsoft 複核入口：https://www.microsoft.com/en-us/wdsi/filesubmission
 ## 驗收範圍
 
 自動測試覆蓋打包相依、離線瀏覽器操作及安裝生命週期，不會登入 Gmail、寄信、操作真人驗證或送出真實訂位。真實網站及 SMTP／IMAP 的最終行為仍取決於現場網路、帳號與網站狀態。
+
+## 第三方語系檔
+
+`packaging/ChineseTraditional.isl` 為 Inno Setup 6.5.0+ 的繁體中文翻譯，原作者與貢獻者列在檔頭，來源為 https://github.com/jrsoftware/issrc/blob/main/Files/Languages/ChineseTraditional.isl （Git blob `2976928a652a82d819c46e69a9b91d82639cca51`）。此檔未修改，隨附原專案的 `packaging/InnoSetup-LICENSE.txt`；固定納入專案，避免建置時依賴 runner 是否安裝額外語系。

@@ -34,11 +34,12 @@ SetupLogging=yes
 #ifdef SignEnabled
 SignTool=islandsign
 SignedUninstaller=yes
+SignedUninstallerDir=..\build\signed-uninstaller
 #endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "chinesetraditional"; MessagesFile: "compiler:Languages\ChineseTraditional.isl"
+Name: "chinesetraditional"; MessagesFile: "ChineseTraditional.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "建立桌面捷徑"; GroupDescription: "其他選項："
