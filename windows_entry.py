@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 def smoke_test(report):
     # Do not touch a real user's settings or connect to the booking/mail services.
+    assert getattr(sys, "frozen", False), "Run this check against the packaged executable"
     with tempfile.TemporaryDirectory(prefix="island-smoke-") as folder:
         os.environ["ISLAND_DATA_DIR"] = folder
         import island_inline_watcher as app
@@ -65,7 +66,7 @@ def main():
             smoke_test(args.smoke_test)
         except Exception:
             Path(args.smoke_test).write_text(json.dumps({"ok": False, "error": traceback.format_exc()}), encoding="utf-8")
-            raise
+            sys.exit(1)
         return
     import island_inline_watcher as app
     app.main()

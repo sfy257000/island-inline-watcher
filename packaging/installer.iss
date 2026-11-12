@@ -47,6 +47,9 @@ Name: "desktopicon"; Description: "建立桌面捷徑"; GroupDescription: "其�
 [Files]
 Source: "..\dist\IslandInlineWatcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[Dirs]
+Name: "{localappdata}\IslandInlineWatcher"; Flags: uninsneveruninstall
+
 [Icons]
 Name: "{autoprograms}\島語 inline 空位監看"; Filename: "{app}\IslandInlineWatcher.exe"
 Name: "{autodesktop}\島語 inline 空位監看"; Filename: "{app}\IslandInlineWatcher.exe"; Tasks: desktopicon
