@@ -106,31 +106,8 @@ document.addEventListener('click', e => {
 """
 
 
-class BrowserTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.playwright = app.sync_playwright().start()
-        cls.browser = cls.playwright.chromium.launch(channel="chrome", headless=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.browser.close()
-        cls.playwright.stop()
-
-    def setUp(self):
-        self.context = self.browser.new_context()
-        self.page = self.context.new_page()
-        self.page.route("https://inline.app/**", lambda r: r.fulfill(content_type="text/html", body=FIXTURE))
-        self.page.goto(QUERY.booking_url())
-        self.cancel = threading.Event()
-        self.flow = app.BrowserFlow(self.page, self.cancel)
-        self.pace = patch.object(app, "ACTION_INTERVAL", 0.1)
-        self.pace.start()
-
-    def tearDown(self):
-        self.pace.stop()
-        self.context.close()
-
+class BrowserInteractions:
+    """Interaction regressions shared with the production native backend."""
     def booking(self, **kwargs):
         return app.start_booking(self.page, QUERY, app.Result(DAY, ("11:30",)), PROFILE,
                                  self.cancel, flow=self.flow, **kwargs)
@@ -431,7 +408,7 @@ class BrowserProfileTests(unittest.TestCase):
                     context.close()
 
 
-class NativeBrowserTests(BrowserTests):
+class NativeBrowserTests(BrowserInteractions, unittest.TestCase):
     """Run the same interaction regressions through the production CDP client."""
     @classmethod
     def setUpClass(cls):

@@ -16,7 +16,7 @@ from time import monotonic, sleep
 from types import SimpleNamespace
 from urllib.request import ProxyHandler, build_opener
 
-from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTimeout
+from browser_errors import BrowserError, BrowserTimeout
 from websocket import create_connection, WebSocketException, WebSocketTimeoutException
 
 

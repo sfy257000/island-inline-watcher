@@ -1,0 +1,57 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: ['codex/**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install uv
+        run: python -m pip install uv==0.13.6
+      - name: Install runtime dependencies
+        run: uv sync --locked --python 3.12
+      - name: Run regression tests on native Chrome
+        run: uv run --locked python -m unittest discover -s tests -v
+      - name: Build installer and source archive
+        shell: pwsh
+        run: ./build_windows.ps1
+      - name: Test installation, update, and uninstall
+        shell: pwsh
+        run: ./tools/test_installer.ps1
+      - name: Scan distribution with Microsoft Defender when available
+        shell: pwsh
+        run: ./tools/scan_windows.ps1
+      - name: Upload installer and checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-release
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload validation reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-validation
+          path: build/validation/*
+          if-no-files-found: ignore

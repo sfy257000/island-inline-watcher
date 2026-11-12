@@ -1,6 +1,6 @@
 """島語 inline 空位監看（Windows 版）。
 
-Windows 一鍵啟動：雙擊 start.bat，由 uv 準備 Python 3.12 和 Playwright。
+Windows 一鍵啟動：安裝版開啟桌面捷徑；原始碼版雙擊 start.bat。
 需要 Google Chrome。程式會開啟獨立的 Chrome 視窗讀取公開訂位頁。
 訂位與 Email 設定可儲存到專案的 .env。SMTP 密碼可選擇一併儲存。
 也可以從 ISLAND_SMTP_PASSWORD 環境變數讀取 SMTP 密碼。
@@ -29,20 +29,15 @@ from urllib.parse import unquote, urlencode, urlparse
 from uuid import uuid4
 
 from dotenv import dotenv_values, set_key
+from app_paths import data_directory
+from browser_errors import BrowserError, BrowserTimeout
 
 from booking_verification import (
     CODE_LENGTH, GMAIL_SMTP, IMAP_ERRORS, REPLY_WAIT_SECONDS, find_challenge, gmail_mailbox, wait_for_reply,
 )
 
-try:
-    from playwright.sync_api import Error as BrowserError
-    from playwright.sync_api import TimeoutError as BrowserTimeout
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    sync_playwright = None
-
 TAIPEI = timezone(timedelta(hours=8))
-APP_VERSION = "v1.03"
+APP_VERSION = "v1.04"
 BOOKING_ROOT = "https://inline.app/booking/-NeqTSgDQOAYi30lg4a7:inline-live-3"
 BRANCHES = {
     "台北漢來店": "-NeqTStJZDIBQHEMSDI8",
@@ -59,8 +54,8 @@ MAX_DAYS = 7
 CALENDAR_MONTHS = 12
 CALENDAR = '#calendar-picker'
 AVAILABLE_DAY = '[data-cy="bt-cal-day"][data-date]:not([disabled]):not([aria-disabled="true"])'
-SETTINGS_ENV = Path(__file__).resolve().with_name(".env")
-BROWSER_PROFILE = Path(__file__).resolve().parent / ".browser-native-profile"
+SETTINGS_ENV = data_directory(__file__) / ".env"
+BROWSER_PROFILE = data_directory(__file__) / ".browser-native-profile"
 BOOKING_KEY = "ISLAND_BOOKING_PROFILE"
 MAIL_KEY = "ISLAND_MAIL_SETTINGS"
 LEGACY_MAIL_FILE = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "IslandInlineWatcher" / "email.json"
@@ -245,6 +240,7 @@ def write_saved_settings(key, settings):
     # JSON quoting produces one dotenv value even when the settings contain
     # quotes, backslashes, or dollar signs.
     value = json.dumps(json.dumps(settings, ensure_ascii=False), ensure_ascii=False)
+    SETTINGS_ENV.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=SETTINGS_ENV.parent, prefix=".env.", delete=False) as file:
         temporary = Path(file.name)
     try:
@@ -519,11 +515,11 @@ class QueryTrace:
     def __init__(self):
         self.started = monotonic()
         self.file = None
-        self.path = Path(__file__).resolve().parent / "logs" / (
+        self.path = data_directory(__file__) / "logs" / (
             datetime.now(TAIPEI).strftime("query-%Y%m%d-%H%M%S-") + uuid4().hex[:8] + ".jsonl"
         )
         try:
-            self.path.parent.mkdir(exist_ok=True)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             self.file = self.path.open("w", encoding="utf-8")
         except OSError:
             pass
@@ -1283,7 +1279,7 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
                         continue
                     if halted.needs_verification:
                         trace.record("verification", "查詢操作停止")
-                        log_note = f" 步驟紀錄：logs/{trace.path.name}" if trace.file else ""
+                        log_note = f" 步驟紀錄：{trace.path}" if trace.file else ""
                         events.put(("verification", halted.detail + " 這次查詢已停止，請在原本的 Chrome 視窗查看。" + log_note))
                         with suppress(BrowserError):
                             page.bring_to_front()
@@ -1776,11 +1772,6 @@ class WatcherWindow:
 
 def main():
     root = tk.Tk()
-    if sync_playwright is None:
-        root.withdraw()
-        messagebox.showerror("缺少 Playwright", "請雙擊專案資料夾的 start.bat，啟動時會自動安裝 Playwright。")
-        root.destroy()
-        return
     WatcherWindow(root)
     root.mainloop()
 
