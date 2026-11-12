@@ -8,3 +8,6 @@ logs/
 .playwright-cli/
 .browser-profile/
 .browser-native-profile/
+build/
+dist/
+release/
