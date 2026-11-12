@@ -21,7 +21,7 @@ def smoke_test(report):
 
         assert importlib.util.find_spec("playwright") is None, "Playwright was bundled unexpectedly"
         assert issubclass(BrowserTimeout, BrowserError)
-        assert app.SETTINGS_ENV.parent == Path(folder)
+        assert app.SETTINGS_ENV.parent == Path(folder).resolve()
         ssl.create_default_context()
         profile = app.BookingProfile("測試", "使用者", "0912345678", "", app.ANY_TABLE)
         profile.save()
