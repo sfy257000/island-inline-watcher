@@ -2,6 +2,8 @@
 
 Windows 桌面程式，可依分店、人數、日期和時段監看島語空位。支援 Email 通知，也能在你開啟自動訂位後，嘗試送出第一筆符合條件的訂位。簡訊驗證可在 Chrome 手動輸入，也可透過 Gmail 回信交給程式送出。
 
+> **自動訂位功能測試中（Beta）**：自動選位、填寫資料、送出訂位及 Gmail 回信驗證仍在測試與調整，可能因網站變動或驗證流程而中斷。請留意 Chrome 畫面，並以 inline 的訂位成功頁面或正式通知確認結果；目前的自動化測試使用模擬頁面，尚不代表完整真實訂位流程已驗證。
+
 ## Windows 安裝版（一般使用者）
 
 Windows 10／11 x64 需已安裝 **Google Chrome**。從 [Releases](https://github.com/sfy257000/island-inline-watcher/releases) 下載 `island-inline-watcher-v1.04-windows-x64-setup.exe`，雙擊安裝後，從桌面或開始功能表的「島語 inline 空位監看」開啟。
@@ -45,7 +47,7 @@ uv run --locked --managed-python --python 3.12 python island_inline_watcher.py
 - 選分店、大人及小孩人數，再選單日、日期範圍或「不限日期」。可加上週末、假日或用餐時段條件。
 - 按「查詢一次」只查時段，即使已勾選自動訂位也一樣。按「開始監看」可持續查詢。輪間隔可填 4 至 86400 秒。
 - 要收信，從「Email 設定」設定 SMTP 和收件地址，並勾選「Email 通知」。收件欄可填多人，每行一個地址，也支援逗號或分號分隔；重複地址會自動合併。程式會分別寄信給每位收件人，並各自記錄已通知時段，失敗的收件人會在後續查詢仍有相同空位時補寄。
-- 要啟動自動訂位，填「訂位資料」，選擇稱謂「先生／小姐／其他」，勾選「自動訂位」後再開始監看。「不限桌型」會先嘗試一般座位，再嘗試板前吧台。
+- 要啟動自動訂位（測試中），填「訂位資料」，選擇稱謂「先生／小姐／其他」，勾選「自動訂位」後再開始監看。「不限桌型」會先嘗試一般座位，再嘗試板前吧台。
 
 監看時需保持程式和 Chrome 開啟。程式每輪會載入一次分店的訂位頁，透過頁面上的人數與日曆選項查詢。查同一輪的其他日期時會沿用該頁。
 
@@ -93,3 +95,20 @@ uv run --locked --managed-python --python 3.12 python -m unittest discover -s te
 ```
 
 Windows 實測範圍及限制見 [2026-11-10 實測紀錄](docs/windows-validation-2026-11-10.md)。
+
+## 歡迎貢獻
+
+歡迎一起改善這個專案！無論是修正錯誤、改進空位監看與自動訂位流程、補充測試，或完善文件，都歡迎透過 [Issues](https://github.com/sfy257000/island-inline-watcher/issues) 討論，或直接提交 [Pull Request](https://github.com/sfy257000/island-inline-watcher/pulls)。較大的功能調整，建議先開 Issue 說明想法。
+
+1. Fork 專案，建立自己的功能或修正分支。
+2. 完成修改，並說明用途、重現方式或預期行為。
+3. 修改程式邏輯時，請補上相關測試；在已安裝 Google Chrome 的 Windows 環境執行上方回歸測試指令。
+4. 提交 Pull Request，附上修改摘要與測試結果；只有文件變更時可註明不涉及程式行為。
+
+請勿提交 `.env`、姓名、手機、Email、SMTP 密碼、Cookie、瀏覽器個人資料或簡訊驗證碼。回報問題時請先遮蔽個資，再提供程式版本、Windows／Chrome 版本、重現步驟與已去識別化的錯誤紀錄。測試請使用模擬頁面，避免意外送出真實訂位或郵件。
+
+## License
+
+本專案採用 [MIT License](LICENSE)，歡迎在保留版權聲明與授權條款的前提下使用、修改及散布。提交貢獻時，請確認你有權提供相關程式碼，並同意以本專案的 MIT 授權釋出。
+
+第三方元件與語系檔仍適用各自的授權條款；Inno Setup 繁體中文語系檔的來源及授權見 [Windows 打包與發佈](docs/windows-packaging.md#第三方語系檔) 與 [Inno Setup License](packaging/InnoSetup-LICENSE.txt)。

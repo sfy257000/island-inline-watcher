@@ -46,6 +46,7 @@ Name: "desktopicon"; Description: "建立桌面捷徑"; GroupDescription: "其�
 
 [Files]
 Source: "..\dist\IslandInlineWatcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
 Name: "{localappdata}\IslandInlineWatcher"; Flags: uninsneveruninstall
