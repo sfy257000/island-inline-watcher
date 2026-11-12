@@ -38,6 +38,9 @@ jobs:
       - name: Test installation, update, and uninstall
         shell: pwsh
         run: ./tools/test_installer.ps1
+      - name: Scan distribution with Microsoft Defender when available
+        shell: pwsh
+        run: ./tools/scan_windows.ps1
       - name: Upload installer and checksums
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

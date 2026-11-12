@@ -40,7 +40,8 @@
 5. 執行離線測試：Tkinter 介面、設定儲存讀取、紀錄、TLS 初始化、原生 Chrome 開頁／輸入／選單／點擊，以及確認沒有 Playwright。
 6. 確認一般 GUI 能開啟並關閉、桌面及開始功能表捷徑、解除安裝登錄。
 7. 覆蓋安裝並核對設定與 Chrome 資料標記保留，再解除安裝核對程式／捷徑移除與資料保留。
-8. 上傳 `windows-release`（下載產物）及 `windows-validation`（測試報告／安裝紀錄／簽章狀態）。
+8. 嘗試以 Microsoft Defender 掃描最終下載檔與解壓後執行期；記錄病毒碼版本與結果。若服務不可用，明確記錄 unavailable；若掃描偵測或執行失敗，停止提供下載產物。
+9. 上傳 `windows-release`（下載產物）及 `windows-validation`（測試報告／安裝紀錄／簽章狀態）。
 
 `tools/test_installer.ps1` 僅允許在可拋棄的 GitHub Actions runner 執行，避免破壞本機的安裝或設定。覆蓋安裝測試重裝同一版本；仍建議正式發布前人工確認從前一個已發布安裝版升級的行為。
 
@@ -68,7 +69,7 @@ SHA-256 用於核對下載檔與公布的版本是否一致，並非安全認證
 Get-FileHash .\island-inline-watcher-v1.04-windows-x64-setup.exe -Algorithm SHA256
 ```
 
-請在發布前以更新過的防毒掃描**最終**安裝檔與安裝後程式。GitHub runner 的建置與功能測試不等同防毒認證；未記錄的掃描一律視為未驗證。若有威脅偵測，先保留檔案 SHA-256、版本、偵測名稱及防毒版本，檢查依賴與建置來源，再向偵測廠商提交複核，確認後才發佈。SmartScreen 的信譽提示與具體惡意軟體偵測必須分開處理；不要要求使用者關閉防毒或加入排除清單。
+請在發布前以更新過的防毒掃描**最終**安裝檔與安裝後程式。GitHub runner 的建置與功能測試不等同防毒認證。`windows-validation/defender.json` 會記錄實際掃描結果與病毒碼；unavailable 表示未掃描，不可解讀成沒有病毒，單一引擎通過也不保證其他引擎的判定。未記錄的掃描一律視為未驗證。若有威脅偵測，先保留檔案 SHA-256、版本、偵測名稱及防毒版本，檢查依賴與建置來源，再向偵測廠商提交複核，確認後才發佈。SmartScreen 的信譽提示與具體惡意軟體偵測必須分開處理；不要要求使用者關閉防毒或加入排除清單。
 
 Microsoft 複核入口：https://www.microsoft.com/en-us/wdsi/filesubmission
 
