@@ -12,6 +12,8 @@ Windows 桌面程式，可依分店、人數、日期和時段監看島語空位
 
 目前安裝檔未簽章，Windows 可能顯示發行者未知或 SmartScreen 提示。請確認下載來源為本專案的 Releases；`SHA256SUMS.txt` 可用來核對下載檔是否一致。
 
+也可以從 GitHub 的 **Code → Download ZIP** 下載原始碼，完整解壓縮後雙擊 **`start.bat`** 啟動。首次執行需連網，會自動準備 Python 與所需套件。
+
 ## 使用方式
 
 1. 選擇分店、人數、日期及用餐時段。
