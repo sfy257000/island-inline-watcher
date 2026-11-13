@@ -1305,6 +1305,8 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
 class WatcherWindow:
     def __init__(self, root):
         self.root = root
+        self.app_icon = tk.PhotoImage(file=str(Path(__file__).resolve().parent / "assets" / "island-inline-watcher.png"))
+        root.iconphoto(True, self.app_icon)
         self.events = queue.Queue()
         self.cancel = threading.Event()
         self.worker = None

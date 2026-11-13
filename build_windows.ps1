@@ -68,10 +68,13 @@ try {
     }
     $compilerArgs += 'packaging/installer.iss'
     Invoke-Checked $InnoSetupCompiler $compilerArgs
+    $setupExe = Join-Path $PSScriptRoot "release\island-inline-watcher-v$version-windows-x64-setup.exe"
     if ($CertificateThumbprint) {
-        $setupExe = Join-Path $PSScriptRoot "release\island-inline-watcher-v$version-windows-x64-setup.exe"
         Invoke-Checked $SignToolPath @('verify', '/pa', $setupExe)
     }
+    Invoke-Checked $python @('tools/check_exe_icons.py', 'assets/island-inline-watcher.ico',
+                            'dist/IslandInlineWatcher/IslandInlineWatcher.exe', $setupExe,
+                            '--report', 'build/validation/icons.json')
     Invoke-Checked $python @('tools/package_source.py')
     Write-Host 'Build complete. See release/ for the installer, source ZIP, and SHA256SUMS.txt.'
 } finally { Pop-Location }
