@@ -1,6 +1,6 @@
 [project]
 name = "island-inline-watcher"
-version = "1.05"
+version = "1.04"
 description = "島語 inline 空位監看與訂位助手"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

@@ -37,7 +37,7 @@ from booking_verification import (
 )
 
 TAIPEI = timezone(timedelta(hours=8))
-APP_VERSION = "v1.05"
+APP_VERSION = "v1.04"
 BOOKING_ROOT = "https://inline.app/booking/-NeqTSgDQOAYi30lg4a7:inline-live-3"
 BRANCHES = {
     "台北漢來店": "-NeqTStJZDIBQHEMSDI8",
