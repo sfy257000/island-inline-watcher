@@ -1,12 +1,14 @@
-# 島語 inline 空位監看 v1.04
+# 島語 inline 空位監看 v1.05
 
 Windows 桌面程式，可依分店、人數、日期和時段監看島語空位。支援 Email 通知，也能在你開啟自動訂位後，嘗試送出第一筆符合條件的訂位。簡訊驗證可在 Chrome 手動輸入，也可透過 Gmail 回信交給程式送出。
 
 > **自動訂位功能測試中（Beta）**：自動選位、填寫資料、送出訂位及 Gmail 回信驗證仍在測試與調整，可能因網站變動或驗證流程而中斷。請留意 Chrome 畫面，並以 inline 的訂位成功頁面或正式通知確認結果；目前的自動化測試使用模擬頁面，尚不代表完整真實訂位流程已驗證。
 
+安裝檔、程式 EXE、桌面捷徑與程式視窗使用專屬的餐盤勾選圖示；圖示資源位於 [`assets`](assets)。
+
 ## Windows 安裝版（一般使用者）
 
-Windows 10／11 x64 需已安裝 **Google Chrome**。從 [Releases](https://github.com/sfy257000/island-inline-watcher/releases) 下載 `island-inline-watcher-v1.04-windows-x64-setup.exe`，雙擊安裝後，從桌面或開始功能表的「島語 inline 空位監看」開啟。
+Windows 10／11 x64 需已安裝 **Google Chrome**。從 [Releases](https://github.com/sfy257000/island-inline-watcher/releases) 下載 `island-inline-watcher-v1.05-windows-x64-setup.exe`，雙擊安裝後，從桌面或開始功能表的「島語 inline 空位監看」開啟。
 
 安裝版已包含 Python 與執行所需套件，不需要另外安裝 Python、uv 或 Playwright。安裝至目前使用者的 `%LOCALAPPDATA%\Programs\IslandInlineWatcher`，不要求系統管理員權限。可從 Windows「設定 → 應用程式」解除安裝。
 

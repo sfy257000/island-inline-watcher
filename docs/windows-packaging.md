@@ -66,7 +66,7 @@
 SHA-256 用於核對下載檔與公布的版本是否一致，並非安全認證：
 
 ```powershell
-Get-FileHash .\island-inline-watcher-v1.04-windows-x64-setup.exe -Algorithm SHA256
+Get-FileHash .\island-inline-watcher-v1.05-windows-x64-setup.exe -Algorithm SHA256
 ```
 
 請在發布前以更新過的防毒掃描**最終**安裝檔與安裝後程式。GitHub runner 的建置與功能測試不等同防毒認證。`windows-validation/defender.json` 會記錄實際掃描結果與病毒碼；unavailable 表示未掃描，不可解讀成沒有病毒，單一引擎通過也不保證其他引擎的判定。未記錄的掃描一律視為未驗證。若有威脅偵測，先保留檔案 SHA-256、版本、偵測名稱及防毒版本，檢查依賴與建置來源，再向偵測廠商提交複核，確認後才發佈。SmartScreen 的信譽提示與具體惡意軟體偵測必須分開處理；不要要求使用者關閉防毒或加入排除清單。
@@ -80,3 +80,16 @@ Microsoft 複核入口：https://www.microsoft.com/en-us/wdsi/filesubmission
 ## 第三方語系檔
 
 `packaging/ChineseTraditional.isl` 為 Inno Setup 6.5.0+ 的繁體中文翻譯，原作者與貢獻者列在檔頭，來源為 https://github.com/jrsoftware/issrc/blob/main/Files/Languages/ChineseTraditional.isl （Git blob `2976928a652a82d819c46e69a9b91d82639cca51`）。此檔未修改，隨附原專案的 `packaging/InnoSetup-LICENSE.txt`；固定納入專案，避免建置時依賴 runner 是否安裝額外語系。
+
+## 專屬 EXE 圖示
+
+`assets/island-inline-watcher.png` 是 256×256 透明背景圖示，供程式視窗使用。`assets/island-inline-watcher.ico` 內含 16、24、32、48、64、128、256 像素版本，供 PyInstaller 的 `icon` 與 Inno Setup 的 `SetupIconFile` 共用。桌面及開始功能表捷徑直接取用程式 EXE 的圖示。建置不需要額外安裝 Pillow 或 ImageMagick。
+
+更新圖示時請同步替換 PNG 與多尺寸 ICO。若已有新的正方形 PNG，可使用 ImageMagick 匯出格式（圖像內容由原始設計決定）：
+
+```powershell
+magick input.png -resize 256x256 -strip assets/island-inline-watcher.png
+magick assets/island-inline-watcher.png -define icon:auto-resize=256,128,64,48,32,24,16 -define icon:png-compression-size=256 assets/island-inline-watcher.ico
+```
+
+`build_windows.ps1` 會以 `tools/check_exe_icons.py` 核對最終安裝檔與程式本體 PE 資源中的圖示尺寸及每張圖示的 SHA-256，結果存於 `build/validation/icons.json`；實際安裝與覆蓋安裝的離線測試也會載入視窗 PNG，避免資源漏包。

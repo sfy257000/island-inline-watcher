@@ -13,7 +13,7 @@ wheels = [
 
 [[package]]
 name = "island-inline-watcher"
-version = "1.4"
+version = "1.5"
 source = { virtual = "." }
 dependencies = [
     { name = "python-dotenv" },

@@ -37,7 +37,7 @@ from booking_verification import (
 )
 
 TAIPEI = timezone(timedelta(hours=8))
-APP_VERSION = "v1.04"
+APP_VERSION = "v1.05"
 BOOKING_ROOT = "https://inline.app/booking/-NeqTSgDQOAYi30lg4a7:inline-live-3"
 BRANCHES = {
     "台北漢來店": "-NeqTStJZDIBQHEMSDI8",
@@ -1305,6 +1305,8 @@ def run_query(query, repeat, cancel, events, settings=None, password="", booking
 class WatcherWindow:
     def __init__(self, root):
         self.root = root
+        self.app_icon = tk.PhotoImage(file=str(Path(__file__).resolve().parent / "assets" / "island-inline-watcher.png"))
+        root.iconphoto(True, self.app_icon)
         self.events = queue.Queue()
         self.cancel = threading.Event()
         self.worker = None

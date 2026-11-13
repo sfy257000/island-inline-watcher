@@ -36,6 +36,7 @@ def smoke_test(report):
             window = app.WatcherWindow(root)
             root.update()
             assert window.booking_profile == profile
+            assert window.app_icon.width() == 256 and window.app_icon.height() == 256
         finally:
             root.destroy()
 
@@ -53,7 +54,7 @@ def smoke_test(report):
         finally:
             browser.close()
         payload = {"ok": True, "version": app.APP_VERSION,
-                   "checks": ["tkinter", "settings", "logs", "tls", "native_chrome", "no_playwright"]}
+                   "checks": ["tkinter", "app_icon", "settings", "logs", "tls", "native_chrome", "no_playwright"]}
     Path(report).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
